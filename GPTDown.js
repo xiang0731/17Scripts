@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT对话转Markdown
 // @namespace    http://tampermonkey.net/
-// @version      0.2
+// @version      0.3
 // @description  将ChatGPT对话转换为Markdown格式，并提供复制和下载功能
 // @author       Xiang
 // @match        https://chat.openai.com/*
@@ -169,7 +169,16 @@
             const tempDiv = document.createElement('div');
             tempDiv.innerHTML = htmlContent;
 
-            // 进行预处理，确保我们能够正确识别结构
+            // 处理标题
+            for (let i = 1; i <= 6; i++) {
+                const headings = tempDiv.querySelectorAll(`h${i}`);
+                headings.forEach(heading => {
+                    // 将HTML标题转换为Markdown格式
+                    const hashes = '#'.repeat(i);
+                    heading.outerHTML = `\n\n${hashes} ${heading.textContent.trim()}\n\n`;
+                });
+            }
+
             // 处理特殊的例子格式（如带有缩进的示例文本）
             const examplePatterns = tempDiv.querySelectorAll('p > em, li > em');
             examplePatterns.forEach(em => {
@@ -302,6 +311,10 @@
     // 复制到剪贴板
     function copyToClipboard() {
         const markdown = getConversationAsMarkdown();
+
+        // 记录转换结果的前500个字符（用于调试）
+        console.log('转换结果预览:', markdown.substring(0, 500));
+
         navigator.clipboard.writeText(markdown)
             .then(() => {
                 alert('对话已复制到剪贴板');
@@ -315,6 +328,10 @@
     // 下载Markdown文件
     function downloadMarkdown() {
         const markdown = getConversationAsMarkdown();
+
+        // 记录转换结果的前500个字符（用于调试）
+        console.log('转换结果预览:', markdown.substring(0, 500));
+
         const conversationTitle = document.title.replace(' - ChatGPT', '').trim() || 'ChatGPT对话';
         const fileName = `${conversationTitle.replace(/[^a-zA-Z0-9\u4e00-\u9fa5]/g, '_')}.md`;
 
