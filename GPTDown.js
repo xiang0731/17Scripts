@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT对话转Markdown
 // @namespace    http://tampermonkey.net/
-// @version      0.3
+// @version      0.4
 // @description  将ChatGPT对话转换为Markdown格式，并提供复制和下载功能
 // @author       Xiang
 // @match        https://chat.openai.com/*
@@ -178,6 +178,76 @@
                     heading.outerHTML = `\n\n${hashes} ${heading.textContent.trim()}\n\n`;
                 });
             }
+
+            // 处理删除线
+            const strikeElements = tempDiv.querySelectorAll('del, s');
+            strikeElements.forEach(element => {
+                element.outerHTML = `~~${element.textContent}~~`;
+            });
+
+            // 处理引用块
+            const blockquotes = tempDiv.querySelectorAll('blockquote');
+            blockquotes.forEach(blockquote => {
+                // 获取引用块内容，并在每行前添加>符号
+                const content = blockquote.innerHTML
+                    .replace(/<p>/g, '\n')
+                    .replace(/<\/p>/g, '')
+                    .split('\n')
+                    .filter(line => line.trim() !== '')
+                    .map(line => `> ${line.trim()}`)
+                    .join('\n');
+
+                blockquote.outerHTML = `\n${content}\n\n`;
+            });
+
+            // 处理表格
+            const tables = tempDiv.querySelectorAll('table');
+            tables.forEach(table => {
+                let markdownTable = '\n';
+
+                // 处理表头
+                const headerRow = table.querySelector('thead tr');
+                if (headerRow) {
+                    const headerCells = headerRow.querySelectorAll('th');
+                    if (headerCells.length > 0) {
+                        // 添加表头行
+                        markdownTable += '| ' + Array.from(headerCells)
+                            .map(cell => cell.textContent.trim())
+                            .join(' | ') + ' |\n';
+
+                        // 添加分隔行
+                        markdownTable += '| ' + Array.from(headerCells)
+                            .map(() => '---')
+                            .join(' | ') + ' |\n';
+                    }
+                }
+
+                // 处理表格主体
+                const rows = table.querySelectorAll('tbody tr');
+                rows.forEach(row => {
+                    const cells = row.querySelectorAll('td');
+                    if (cells.length > 0) {
+                        markdownTable += '| ' + Array.from(cells)
+                            .map(cell => cell.textContent.trim())
+                            .join(' | ') + ' |\n';
+                    }
+                });
+
+                // 如果没有找到表头，但有表格行，则创建一个没有表头的表格
+                if (!headerRow && rows.length > 0) {
+                    const firstRow = rows[0];
+                    const cellCount = firstRow.querySelectorAll('td').length;
+                    if (cellCount > 0) {
+                        // 在第一行前插入分隔行
+                        const separatorIndex = markdownTable.indexOf('\n') + 1;
+                        const separator = '| ' + Array(cellCount).fill('---').join(' | ') + ' |\n';
+                        markdownTable = markdownTable.slice(0, separatorIndex) + separator + markdownTable.slice(separatorIndex);
+                    }
+                }
+
+                markdownTable += '\n';
+                table.outerHTML = markdownTable;
+            });
 
             // 处理特殊的例子格式（如带有缩进的示例文本）
             const examplePatterns = tempDiv.querySelectorAll('p > em, li > em');
