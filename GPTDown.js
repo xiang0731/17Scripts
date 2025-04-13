@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT对话转Markdown
 // @namespace    http://tampermonkey.net/
-// @version      0.4
+// @version      0.5
 // @description  将ChatGPT对话转换为Markdown格式，并提供复制和下载功能
 // @author       Xiang
 // @match        https://chat.openai.com/*
@@ -266,8 +266,55 @@
             // 处理代码块
             const codeBlocks = tempDiv.querySelectorAll('pre');
             codeBlocks.forEach(codeBlock => {
-                const language = codeBlock.querySelector('code')?.className.replace('language-', '') || '';
-                const codeContent = codeBlock.textContent.trim();
+                // 获取代码元素及其语言
+                const codeElement = codeBlock.querySelector('code');
+                if (!codeElement) return;
+
+                // 尝试从类名中提取语言
+                let language = '';
+                const classNames = codeElement.className.split(' ');
+                for (const className of classNames) {
+                    if (className.startsWith('language-')) {
+                        language = className.replace('language-', '');
+                        // 确保只提取实际语言名称，不包含额外的标记
+                        if (language.includes(' ')) {
+                            language = language.split(' ')[0];
+                        }
+                        break;
+                    }
+                }
+
+                // 特殊处理：如果没有找到语言标识但有copy-btn，尝试从其他元素获取
+                if (!language) {
+                    const copyBtn = codeBlock.querySelector('.copy-btn');
+                    if (copyBtn && copyBtn.getAttribute('data-code-type')) {
+                        language = copyBtn.getAttribute('data-code-type');
+                    }
+
+                    // 从pre标签的类名中寻找语言标识
+                    const preClasses = codeBlock.className.split(' ');
+                    for (const cls of preClasses) {
+                        if (cls.startsWith('language-')) {
+                            language = cls.replace('language-', '');
+                            break;
+                        }
+                    }
+                }
+
+                // 清理获取的代码内容
+                let codeContent = codeElement.textContent.trim();
+
+                // 移除可能的按钮文本（"复制"、"编辑"等）
+                codeContent = codeContent
+                    .replace(/^(复制|编辑|copy|edit|markdown)[\s\n]*/i, '')
+                    .replace(/^(whitespace-pre!)[\s\n]*/i, '');
+
+                // 移除可能在第一行的语言标识
+                if (codeContent.startsWith(language) && (codeContent[language.length] === ' ' || codeContent[language.length] === '\n')) {
+                    codeContent = codeContent.substring(language.length).trim();
+                }
+
+                // 创建markdown代码块
                 const markdownCodeBlock = `\`\`\`${language}\n${codeContent}\n\`\`\``;
                 codeBlock.outerHTML = markdownCodeBlock;
             });
