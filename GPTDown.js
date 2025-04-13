@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT对话转Markdown
 // @namespace    http://tampermonkey.net/
-// @version      0.1
+// @version      0.2
 // @description  将ChatGPT对话转换为Markdown格式，并提供复制和下载功能
 // @author       Xiang
 // @match        https://chat.openai.com/*
@@ -95,7 +95,10 @@
 
         if (!threadContainer) {
             console.error('无法找到对话容器');
-            alert('无法找到对话内容。请在控制台中提供当前页面HTML以帮助更新脚本。');
+            // 提供更详细的调试信息
+            console.log('页面结构:', document.body.innerHTML.substring(0, 5000)); // 输出前5000个字符
+            // 建议用户使用调试功能
+            alert('无法找到对话内容。请点击"调试信息"按钮，然后将控制台输出发送给开发者以帮助修复问题。');
             return "无法找到对话内容";
         }
 
@@ -115,7 +118,10 @@
 
         if (!messageNodes || messageNodes.length === 0) {
             console.error('无法找到对话消息');
-            alert('无法找到对话消息。尝试查看浏览器控制台获取更多信息。');
+            // 提供更详细的调试信息，输出找到的容器
+            console.log('找到的容器:', threadContainer);
+            console.log('容器HTML:', threadContainer.innerHTML.substring(0, 5000)); // 输出前5000个字符
+            alert('无法找到对话消息。请点击"调试信息"按钮获取更多信息。');
             return "无法找到对话消息";
         }
 
@@ -163,6 +169,21 @@
             const tempDiv = document.createElement('div');
             tempDiv.innerHTML = htmlContent;
 
+            // 进行预处理，确保我们能够正确识别结构
+            // 处理特殊的例子格式（如带有缩进的示例文本）
+            const examplePatterns = tempDiv.querySelectorAll('p > em, li > em');
+            examplePatterns.forEach(em => {
+                const parent = em.parentElement;
+                // 如果这是个例子，将其包装在正确的格式中
+                if (parent.textContent.includes('例如') || parent.textContent.includes('example')) {
+                    // 确保例子前有短横线，适当格式化
+                    if (parent.tagName.toLowerCase() !== 'li') {
+                        const exampleText = em.outerHTML;
+                        parent.innerHTML = parent.innerHTML.replace(em.outerHTML, `\n   - ${exampleText}`);
+                    }
+                }
+            });
+
             // 处理代码块
             const codeBlocks = tempDiv.querySelectorAll('pre');
             codeBlocks.forEach(codeBlock => {
@@ -196,16 +217,67 @@
                 i.outerHTML = `*${i.textContent}*`;
             });
 
-            // 处理列表
-            const lists = tempDiv.querySelectorAll('ol, ul');
-            lists.forEach(list => {
-                const items = list.querySelectorAll('li');
-                let listContent = '';
-                items.forEach((item, index) => {
-                    const prefix = list.tagName === 'OL' ? `${index + 1}. ` : '- ';
-                    listContent += `${prefix}${item.textContent}\n`;
-                });
-                list.outerHTML = `\n${listContent}\n`;
+            // 改进的列表处理
+            function processLists(element) {
+                const lists = element.querySelectorAll('ol, ul');
+
+                // 从最深层嵌套的列表开始处理
+                for (let i = lists.length - 1; i >= 0; i--) {
+                    const list = lists[i];
+
+                    // 检查是否已经处理过
+                    if (list.hasAttribute('data-processed')) continue;
+
+                    const isOrdered = list.tagName.toLowerCase() === 'ol';
+                    const items = list.querySelectorAll(':scope > li');
+                    let listContent = '\n';
+
+                    items.forEach((item, index) => {
+                        // 确定缩进级别
+                        let indentLevel = 0;
+                        let parent = list.parentElement;
+                        while (parent) {
+                            if (parent.tagName.toLowerCase() === 'li') {
+                                indentLevel++;
+                            }
+                            parent = parent.parentElement;
+                        }
+
+                        // 添加适当的缩进
+                        const indent = '  '.repeat(indentLevel);
+
+                        // 添加正确的列表符号
+                        const prefix = isOrdered ? `${index + 1}. ` : '- ';
+
+                        // 获取纯文本并保留内部HTML结构
+                        const itemContent = item.innerHTML
+                            .replace(/<\/?ol>/g, '')
+                            .replace(/<\/?ul>/g, '')
+                            .replace(/<li>/g, '')
+                            .replace(/<\/li>/g, '\n');
+
+                        listContent += `${indent}${prefix}${itemContent.trim()}\n`;
+                    });
+
+                    list.outerHTML = listContent;
+                    list.setAttribute('data-processed', 'true');
+                }
+            }
+
+            // 处理嵌套列表结构
+            processLists(tempDiv);
+
+            // 处理剩余的任何单个列表项
+            const remainingItems = tempDiv.querySelectorAll('li');
+            remainingItems.forEach(item => {
+                const isInList = item.parentElement &&
+                    (item.parentElement.tagName.toLowerCase() === 'ol' ||
+                        item.parentElement.tagName.toLowerCase() === 'ul');
+
+                if (!isInList) {
+                    // 孤立的列表项转换为段落
+                    item.outerHTML = `<p>${item.innerHTML}</p>`;
+                }
             });
 
             markdown += tempDiv.textContent.trim() + '\n\n';
@@ -214,6 +286,15 @@
         // 添加生成时间脚注
         const date = new Date().toLocaleString();
         markdown += `---\n*保存时间: ${date}*`;
+
+        // 最终清理Markdown内容
+        markdown = markdown
+            // 删除多余的空行
+            .replace(/\n{3,}/g, '\n\n')
+            // 修复列表格式中可能的问题
+            .replace(/(\d+\.\s.*\n)\n(?=\s+[-*])/g, '$1')
+            // 确保列表后有适当的空行
+            .replace(/(\n\s*[-*].+\n)(?=[^\s])/g, '$1\n');
 
         return markdown;
     }
