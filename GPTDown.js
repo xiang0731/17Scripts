@@ -1,9 +1,10 @@
 // ==UserScript==
 // @name         ChatGPT对话转Markdown
 // @namespace    http://tampermonkey.net/
-// @version      0.5
+// @version      1.0
 // @description  将ChatGPT对话转换为Markdown格式，并提供复制和下载功能
-// @author       Xiang
+// @author       Xiang0731
+// @licens       MIT
 // @match        https://chat.openai.com/*
 // @match        https://chatgpt.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=openai.com
