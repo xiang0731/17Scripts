@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         LINUX DO 默认树形评论区1.4
+// @name         LINUX DO 默认树形评论区1.5
 // @namespace    http://tampermonkey.net/
-// @version      1.4
-// @description  在访问 LINUX DO 帖子时，默认使用树形评论区显示（自动将 /t/ 替换为 /n/，修复楼层尾缀导致白屏及滚动位置残留问题）
+// @version      1.5
+// @description  在访问 LINUX DO 帖子时，默认使用树形评论区显示，并在话题页提供全回复话题内搜索
 // @author       You
 // @match        *://linux.do/*
 // @grant        none
@@ -14,11 +14,18 @@
 
     const SITE_TITLE = 'LINUX DO';
     const ALLOW_FLAT_TOPIC_KEY = 'linuxdo-comment-allow-flat-topic-id';
+    const TOPIC_SEARCH_BUTTON_ID = 'linuxdo-topic-search-entry';
+    const TOPIC_SEARCH_PANEL_ID = 'linuxdo-topic-search-panel';
+    const TOPIC_SEARCH_STYLE_ID = 'linuxdo-topic-search-style';
     let forceScrollTop = false; // 用于标记是否需要强制滚动到顶部
     let pendingTopicTitle = '';
     let pendingTopicId = '';
     let topicTitleRequest = null;
     let topicTitleRequestId = '';
+    let topicSearchAbortController = null;
+    let topicSearchRefreshTimer = null;
+    let topicSearchObserver = null;
+    let topicSearchNavigationHooksInstalled = false;
 
     function normalizeTitleText(text) {
         return (text || '').replace(/\s+/g, ' ').trim();
@@ -57,12 +64,91 @@
         return match ? match[1] : '';
     }
 
+    function getTopicSlugFromPath(pathname) {
+        let match = normalizeTitleText(pathname).match(/^\/[tn]\/([^/]+)\/\d+(?:\/|$)/);
+        return match && !/^\d+$/.test(match[1]) ? match[1] : '';
+    }
+
     function getTopicIdFromUrl(urlValue) {
         try {
             return getTopicIdFromPath(new URL(urlValue, window.location.origin).pathname);
         } catch (e) {
             return '';
         }
+    }
+
+    function shouldShowTopicSearchButton(pathname) {
+        return normalizeTitleText(pathname).startsWith('/n/') && !!getTopicIdFromPath(pathname);
+    }
+
+    function decodeBasicHtmlEntities(text) {
+        return String(text || '')
+            .replace(/&nbsp;/gi, ' ')
+            .replace(/&amp;/gi, '&')
+            .replace(/&lt;/gi, '<')
+            .replace(/&gt;/gi, '>')
+            .replace(/&quot;/gi, '"')
+            .replace(/&#39;/gi, "'")
+            .replace(/&#(\d+);/g, (match, code) => {
+                let value = Number(code);
+                return Number.isFinite(value) ? String.fromCharCode(value) : match;
+            });
+    }
+
+    function stripHtmlToText(html) {
+        return normalizeTitleText(decodeBasicHtmlEntities(String(html || '').replace(/<[^>]*>/g, ' ')));
+    }
+
+    function buildTopicSearchQuery(topicId, keyword) {
+        let cleanTopicId = normalizeTitleText(topicId);
+        let cleanKeyword = normalizeTitleText(keyword);
+        if (!cleanTopicId || !cleanKeyword) return '';
+        return `topic:${cleanTopicId} ${cleanKeyword}`;
+    }
+
+    function buildTopicSearchEndpoint(topicId, keyword) {
+        let query = buildTopicSearchQuery(topicId, keyword);
+        return query ? `/search/query.json?term=${encodeURIComponent(query)}&include_blurbs=true` : '';
+    }
+
+    function getTopicSearchResultUrl(result, topicSlug) {
+        let topicId = result && (result.topicId || result.topic_id);
+        let postNumber = result && (result.postNumber || result.post_number);
+        let slug = normalizeTitleText(topicSlug || (result && (result.topicSlug || result.topic_slug)));
+        if (topicId && postNumber && slug) return `/t/${slug}/${topicId}/${postNumber}`;
+        return topicId && postNumber ? `/t/${topicId}/${postNumber}` : '';
+    }
+
+    function normalizeTopicSearchResults(data) {
+        let posts = data && Array.isArray(data.posts) ? data.posts : [];
+        let topicSlugs = {};
+        let topics = data && Array.isArray(data.topics) ? data.topics : [];
+        topics.forEach((topic) => {
+            if (topic && topic.id && topic.slug) topicSlugs[String(topic.id)] = topic.slug;
+        });
+        let currentTopicSlug = getTopicSlugFromPath(window.location.pathname);
+
+        return posts.map((post) => {
+            let topicSlug = normalizeTitleText(post.topic_slug) ||
+                topicSlugs[String(post.topic_id)] ||
+                currentTopicSlug;
+            let result = {
+                author: normalizeTitleText(post.name) || normalizeTitleText(post.username) || '未知用户',
+                blurb: stripHtmlToText(post.blurb),
+                createdAt: post.created_at || '',
+                id: post.id,
+                postNumber: post.post_number,
+                topicId: post.topic_id,
+                url: '',
+                username: normalizeTitleText(post.username),
+            };
+            result.url = getTopicSearchResultUrl(result, topicSlug);
+            return result;
+        }).filter((result) => result.topicId && result.postNumber && result.url);
+    }
+
+    function shouldBypassNestedRewrite(link) {
+        return !!(link && link.dataset && link.dataset.linuxdoTopicSearchFlat === 'true');
     }
 
     function getSessionStorage() {
@@ -191,6 +277,431 @@
         return originalUrl;
     }
 
+    function injectTopicSearchStyles() {
+        if (!document.head || document.getElementById(TOPIC_SEARCH_STYLE_ID)) return;
+
+        let style = document.createElement('style');
+        style.id = TOPIC_SEARCH_STYLE_ID;
+        style.textContent = `
+            .linuxdo-topic-search-entry {
+                display: inline-flex;
+                align-items: center;
+            }
+
+            .linuxdo-topic-search-button svg {
+                width: 1em;
+                height: 1em;
+            }
+
+            #${TOPIC_SEARCH_PANEL_ID} {
+                position: fixed;
+                top: 3.75rem;
+                right: 1rem;
+                width: min(28rem, calc(100vw - 2rem));
+                max-height: min(38rem, calc(100vh - 5rem));
+                z-index: 1200;
+                display: flex;
+                flex-direction: column;
+                border: 1px solid var(--primary-low, #d6d6d6);
+                border-radius: 8px;
+                background: var(--secondary, #fff);
+                color: var(--primary, #222);
+                box-shadow: 0 12px 36px rgba(0, 0, 0, 0.18);
+                overflow: hidden;
+            }
+
+            #${TOPIC_SEARCH_PANEL_ID}[hidden] {
+                display: none;
+            }
+
+            .linuxdo-topic-search-head {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 0.75rem;
+                padding: 0.75rem 0.875rem;
+                border-bottom: 1px solid var(--primary-low, #d6d6d6);
+                font-weight: 600;
+            }
+
+            .linuxdo-topic-search-close {
+                border: 0;
+                background: transparent;
+                color: inherit;
+                cursor: pointer;
+                font-size: 1.25rem;
+                line-height: 1;
+                padding: 0.125rem 0.25rem;
+            }
+
+            .linuxdo-topic-search-form {
+                display: flex;
+                gap: 0.5rem;
+                padding: 0.75rem 0.875rem;
+                border-bottom: 1px solid var(--primary-low, #d6d6d6);
+            }
+
+            .linuxdo-topic-search-input {
+                flex: 1;
+                min-width: 0;
+                border: 1px solid var(--primary-low-mid, #bdbdbd);
+                border-radius: 6px;
+                background: var(--secondary, #fff);
+                color: var(--primary, #222);
+                font: inherit;
+                padding: 0.45rem 0.6rem;
+            }
+
+            .linuxdo-topic-search-submit {
+                border: 0;
+                border-radius: 6px;
+                background: var(--tertiary, #0088cc);
+                color: var(--secondary, #fff);
+                cursor: pointer;
+                font: inherit;
+                font-weight: 600;
+                padding: 0.45rem 0.75rem;
+                white-space: nowrap;
+            }
+
+            .linuxdo-topic-search-status {
+                padding: 0.65rem 0.875rem;
+                color: var(--primary-medium, #666);
+                font-size: 0.9rem;
+            }
+
+            .linuxdo-topic-search-results {
+                margin: 0;
+                padding: 0;
+                overflow: auto;
+                list-style: none;
+            }
+
+            .linuxdo-topic-search-result {
+                display: block;
+                padding: 0.75rem 0.875rem;
+                border-top: 1px solid var(--primary-low, #d6d6d6);
+                color: inherit;
+                text-decoration: none;
+            }
+
+            .linuxdo-topic-search-result:hover,
+            .linuxdo-topic-search-result:focus {
+                background: var(--primary-very-low, #f7f7f7);
+                outline: none;
+            }
+
+            .linuxdo-topic-search-meta {
+                display: flex;
+                align-items: center;
+                gap: 0.5rem;
+                margin-bottom: 0.35rem;
+                color: var(--primary-medium, #666);
+                font-size: 0.82rem;
+            }
+
+            .linuxdo-topic-search-post {
+                color: var(--tertiary, #0088cc);
+                font-weight: 600;
+            }
+
+            .linuxdo-topic-search-blurb {
+                color: var(--primary, #222);
+                font-size: 0.94rem;
+                line-height: 1.45;
+            }
+
+            @media (max-width: 600px) {
+                #${TOPIC_SEARCH_PANEL_ID} {
+                    top: 3.25rem;
+                    right: 0.5rem;
+                    width: calc(100vw - 1rem);
+                }
+            }
+        `;
+        document.head.appendChild(style);
+    }
+
+    function findHeaderSearchEntry() {
+        let selectors = [
+            '.d-header-icons .search-dropdown',
+            '.d-header-icons #search-button',
+            '.d-header-icons button[aria-label*="搜索"]',
+            '.d-header-icons button[title*="搜索"]',
+            '.d-header-icons button[aria-label*="Search"]',
+            '.d-header-icons button[title*="Search"]',
+            '#search-button',
+            '.search-dropdown',
+        ];
+
+        for (let selector of selectors) {
+            let node = document.querySelector(selector);
+            if (!node) continue;
+            return node.closest ? node.closest('li, .header-dropdown-toggle') || node : node;
+        }
+
+        return null;
+    }
+
+    function getCurrentTopicSearchId() {
+        return shouldShowTopicSearchButton(window.location.pathname) ?
+            getTopicIdFromPath(window.location.pathname) :
+            '';
+    }
+
+    function createTopicSearchButton() {
+        let entry = document.createElement('li');
+        entry.id = TOPIC_SEARCH_BUTTON_ID;
+        entry.className = 'header-dropdown-toggle linuxdo-topic-search-entry';
+
+        let button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'btn no-text btn-icon linuxdo-topic-search-button';
+        button.title = '在本话题中搜索';
+        button.setAttribute('aria-label', '在本话题中搜索');
+        button.innerHTML = `
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <path fill="currentColor" d="M9.5 3a6.5 6.5 0 0 1 5.15 10.46l4.44 4.45-1.41 1.41-4.45-4.44A6.5 6.5 0 1 1 9.5 3Zm0 2a4.5 4.5 0 1 0 0 9 4.5 4.5 0 0 0 0-9Zm8.5-2v3h3v2h-3v3h-2V8h-3V6h3V3h2Z"></path>
+            </svg>
+        `;
+        button.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            toggleTopicSearchPanel();
+        });
+
+        entry.appendChild(button);
+        return entry;
+    }
+
+    function refreshTopicSearchUi() {
+        let existingEntry = document.getElementById(TOPIC_SEARCH_BUTTON_ID);
+        if (!document.body || !shouldShowTopicSearchButton(window.location.pathname)) {
+            if (existingEntry) existingEntry.remove();
+            closeTopicSearchPanel();
+            return;
+        }
+
+        injectTopicSearchStyles();
+        if (existingEntry) return;
+
+        let headerSearchEntry = findHeaderSearchEntry();
+        if (!headerSearchEntry || !headerSearchEntry.parentNode) return;
+
+        let entry = createTopicSearchButton();
+        headerSearchEntry.parentNode.insertBefore(entry, headerSearchEntry.nextSibling);
+    }
+
+    function scheduleTopicSearchUiRefresh() {
+        if (topicSearchRefreshTimer) clearTimeout(topicSearchRefreshTimer);
+        topicSearchRefreshTimer = setTimeout(refreshTopicSearchUi, 100);
+    }
+
+    function ensureTopicSearchPanel() {
+        let existingPanel = document.getElementById(TOPIC_SEARCH_PANEL_ID);
+        if (existingPanel) return existingPanel;
+
+        injectTopicSearchStyles();
+
+        let panel = document.createElement('section');
+        panel.id = TOPIC_SEARCH_PANEL_ID;
+        panel.hidden = true;
+        panel.setAttribute('aria-label', '本话题搜索');
+        panel.innerHTML = `
+            <div class="linuxdo-topic-search-head">
+                <span>本话题搜索</span>
+                <button type="button" class="linuxdo-topic-search-close" aria-label="关闭">×</button>
+            </div>
+            <form class="linuxdo-topic-search-form">
+                <input class="linuxdo-topic-search-input" type="search" autocomplete="off" placeholder="搜索本话题所有回复">
+                <button class="linuxdo-topic-search-submit" type="submit">搜索</button>
+            </form>
+            <div class="linuxdo-topic-search-status">输入关键词后回车，搜索未加载的回复。</div>
+            <ol class="linuxdo-topic-search-results"></ol>
+        `;
+        document.body.appendChild(panel);
+
+        panel.querySelector('.linuxdo-topic-search-close').addEventListener('click', closeTopicSearchPanel);
+        panel.querySelector('.linuxdo-topic-search-form').addEventListener('submit', (event) => {
+            event.preventDefault();
+            performTopicSearch(panel.querySelector('.linuxdo-topic-search-input').value);
+        });
+
+        document.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape') closeTopicSearchPanel();
+        });
+
+        document.addEventListener('click', (event) => {
+            if (panel.hidden) return;
+            let entry = document.getElementById(TOPIC_SEARCH_BUTTON_ID);
+            if (panel.contains(event.target) || (entry && entry.contains(event.target))) return;
+            closeTopicSearchPanel();
+        });
+
+        return panel;
+    }
+
+    function openTopicSearchPanel() {
+        let topicId = getCurrentTopicSearchId();
+        if (!topicId) return;
+
+        let panel = ensureTopicSearchPanel();
+        panel.dataset.topicId = topicId;
+        panel.hidden = false;
+        setTopicSearchStatus('输入关键词后回车，搜索未加载的回复。');
+
+        let input = panel.querySelector('.linuxdo-topic-search-input');
+        if (input) {
+            input.focus();
+            input.select();
+        }
+    }
+
+    function closeTopicSearchPanel() {
+        let panel = document.getElementById(TOPIC_SEARCH_PANEL_ID);
+        if (panel) panel.hidden = true;
+        if (topicSearchAbortController) {
+            topicSearchAbortController.abort();
+            topicSearchAbortController = null;
+        }
+    }
+
+    function toggleTopicSearchPanel() {
+        let panel = document.getElementById(TOPIC_SEARCH_PANEL_ID);
+        if (panel && !panel.hidden) {
+            closeTopicSearchPanel();
+        } else {
+            openTopicSearchPanel();
+        }
+    }
+
+    function setTopicSearchStatus(message) {
+        let panel = document.getElementById(TOPIC_SEARCH_PANEL_ID);
+        if (!panel) return;
+        let status = panel.querySelector('.linuxdo-topic-search-status');
+        if (status) status.textContent = message;
+    }
+
+    function clearTopicSearchResults() {
+        let panel = document.getElementById(TOPIC_SEARCH_PANEL_ID);
+        if (!panel) return;
+        let list = panel.querySelector('.linuxdo-topic-search-results');
+        if (list) list.textContent = '';
+    }
+
+    function renderTopicSearchResults(results) {
+        let panel = document.getElementById(TOPIC_SEARCH_PANEL_ID);
+        if (!panel) return;
+
+        let list = panel.querySelector('.linuxdo-topic-search-results');
+        if (!list) return;
+
+        list.textContent = '';
+
+        results.forEach((result) => {
+            let item = document.createElement('li');
+            let link = document.createElement('a');
+            let meta = document.createElement('div');
+            let post = document.createElement('span');
+            let author = document.createElement('span');
+            let blurb = document.createElement('div');
+
+            link.className = 'linuxdo-topic-search-result';
+            link.href = result.url;
+            link.dataset.linuxdoTopicSearchFlat = 'true';
+            link.title = `打开第 ${result.postNumber} 楼`;
+
+            meta.className = 'linuxdo-topic-search-meta';
+            post.className = 'linuxdo-topic-search-post';
+            post.textContent = `#${result.postNumber}`;
+            author.textContent = result.author;
+
+            blurb.className = 'linuxdo-topic-search-blurb';
+            blurb.textContent = result.blurb || '无摘要';
+
+            meta.appendChild(post);
+            meta.appendChild(author);
+            link.appendChild(meta);
+            link.appendChild(blurb);
+            item.appendChild(link);
+            list.appendChild(item);
+        });
+    }
+
+    function performTopicSearch(keyword) {
+        let topicId = getCurrentTopicSearchId();
+        let endpoint = buildTopicSearchEndpoint(topicId, keyword);
+        if (!endpoint) {
+            clearTopicSearchResults();
+            setTopicSearchStatus('请输入要搜索的关键词。');
+            return;
+        }
+
+        if (topicSearchAbortController) topicSearchAbortController.abort();
+        topicSearchAbortController = typeof AbortController === 'function' ? new AbortController() : null;
+
+        clearTopicSearchResults();
+        setTopicSearchStatus('正在搜索本话题...');
+
+        fetch(endpoint, {
+            credentials: 'same-origin',
+            headers: { Accept: 'application/json' },
+            signal: topicSearchAbortController ? topicSearchAbortController.signal : undefined,
+        })
+            .then((response) => {
+                if (!response || !response.ok) {
+                    throw new Error(`搜索请求失败: ${response ? response.status : 'unknown'}`);
+                }
+                return response.json();
+            })
+            .then((data) => {
+                let error = data && data.grouped_search_result && data.grouped_search_result.error;
+                if (error) throw new Error(error);
+
+                let results = normalizeTopicSearchResults(data);
+                renderTopicSearchResults(results);
+                setTopicSearchStatus(results.length ? `找到 ${results.length} 条结果。点击结果会精确打开对应楼层。` : '没有找到匹配结果。');
+            })
+            .catch((error) => {
+                if (error && error.name === 'AbortError') return;
+                clearTopicSearchResults();
+                setTopicSearchStatus(error && error.message ? error.message : '搜索失败，请稍后再试。');
+                console.error('树形评论区脚本话题内搜索失败:', error);
+            });
+    }
+
+    function installTopicSearchNavigationHooks() {
+        if (topicSearchNavigationHooksInstalled || !window.history) return;
+        topicSearchNavigationHooksInstalled = true;
+
+        ['pushState', 'replaceState'].forEach((methodName) => {
+            let originalMethod = window.history[methodName];
+            if (typeof originalMethod !== 'function') return;
+
+            window.history[methodName] = function () {
+                let result = originalMethod.apply(this, arguments);
+                scheduleTopicSearchUiRefresh();
+                return result;
+            };
+        });
+
+        window.addEventListener('popstate', scheduleTopicSearchUiRefresh);
+    }
+
+    function observeTopicSearchHeader() {
+        if (topicSearchObserver || !document.body) return;
+        topicSearchObserver = new MutationObserver(scheduleTopicSearchUiRefresh);
+        topicSearchObserver.observe(document.body, { childList: true, subtree: true });
+    }
+
+    function runWhenBodyReady(callback) {
+        if (document.body) {
+            callback();
+        } else {
+            window.addEventListener('DOMContentLoaded', callback);
+        }
+    }
+
     // 1. 处理页面初次加载或外部直接跳转
     if (window.location.pathname.startsWith('/t/')) {
         let currentTopicId = getTopicIdFromPath(window.location.pathname);
@@ -209,6 +720,12 @@
 
         let href = a.getAttribute('href');
         if (!href) return;
+
+        // 搜索结果需要精确打开对应楼层，因此允许这类链接临时使用 Discourse 原始平面话题地址。
+        if (shouldBypassNestedRewrite(a)) {
+            rememberFlatViewBypass(getTopicIdFromUrl(href));
+            return;
+        }
 
         // 防死循环：允许用户主动点击切回平铺模式(View as flat / 以平面图查看)
         if (isFlatViewLink(a)) {
@@ -257,4 +774,19 @@
 
         scheduleTitleRestore();
     });
+
+    installTopicSearchNavigationHooks();
+    runWhenBodyReady(() => {
+        refreshTopicSearchUi();
+        observeTopicSearchHeader();
+    });
+
+    if (typeof window.__LINUXDO_COMMENT_TEST_HOOK__ === 'function') {
+        window.__LINUXDO_COMMENT_TEST_HOOK__({
+            buildTopicSearchEndpoint,
+            normalizeTopicSearchResults,
+            shouldBypassNestedRewrite,
+            shouldShowTopicSearchButton,
+        });
+    }
 })();
