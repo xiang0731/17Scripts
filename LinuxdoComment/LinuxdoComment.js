@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         LINUX DO 默认树形评论区1.5
+// @name         LINUX DO 默认树形评论区1.6
 // @namespace    http://tampermonkey.net/
-// @version      1.5
+// @version      1.6
 // @description  在访问 LINUX DO 帖子时，默认使用树形评论区显示，并在话题页提供全回复话题内搜索
 // @author       You
 // @match        *://linux.do/*
@@ -14,6 +14,8 @@
 
     const SITE_TITLE = 'LINUX DO';
     const ALLOW_FLAT_TOPIC_KEY = 'linuxdo-comment-allow-flat-topic-id';
+    const ALLOW_NESTED_FLOOR_TOPIC_KEY = 'linuxdo-comment-allow-nested-floor-topic-id';
+    const TOPIC_SEARCH_TARGET_KEY = 'linuxdo-comment-topic-search-target';
     const TOPIC_SEARCH_BUTTON_ID = 'linuxdo-topic-search-entry';
     const TOPIC_SEARCH_PANEL_ID = 'linuxdo-topic-search-panel';
     const TOPIC_SEARCH_STYLE_ID = 'linuxdo-topic-search-style';
@@ -26,9 +28,10 @@
     let topicSearchRefreshTimer = null;
     let topicSearchObserver = null;
     let topicSearchNavigationHooksInstalled = false;
+    let handledTopicSearchTargetKey = '';
 
     function normalizeTitleText(text) {
-        return (text || '').replace(/\s+/g, ' ').trim();
+        return String(text || '').replace(/\s+/g, ' ').trim();
     }
 
     function stripSiteTitle(title) {
@@ -111,12 +114,44 @@
         return query ? `/search/query.json?term=${encodeURIComponent(query)}&include_blurbs=true` : '';
     }
 
-    function getTopicSearchResultUrl(result, topicSlug) {
+    function getTopicSearchFlatUrl(result, topicSlug) {
         let topicId = result && (result.topicId || result.topic_id);
         let postNumber = result && (result.postNumber || result.post_number);
         let slug = normalizeTitleText(topicSlug || (result && (result.topicSlug || result.topic_slug)));
         if (topicId && postNumber && slug) return `/t/${slug}/${topicId}/${postNumber}`;
         return topicId && postNumber ? `/t/${topicId}/${postNumber}` : '';
+    }
+
+    function getTopicSearchNestedUrl(result, topicSlug) {
+        let topicId = result && (result.topicId || result.topic_id);
+        let postNumber = result && (result.postNumber || result.post_number);
+        let slug = normalizeTitleText(topicSlug || (result && (result.topicSlug || result.topic_slug)));
+        if (topicId && postNumber && slug) return `/n/${slug}/${topicId}/${postNumber}`;
+        return topicId && postNumber ? `/n/${topicId}/${postNumber}` : '';
+    }
+
+    function getTopicSearchTargetSelectors(target) {
+        let postId = normalizeTitleText(target && (target.postId || target.id || target.post_id));
+        let postNumber = normalizeTitleText(target && (target.postNumber || target.post_number));
+        let selectors = [];
+        if (postId) {
+            selectors.push(`#post_${postId}`);
+            selectors.push(`#post-${postId}`);
+            selectors.push(`[data-post-id="${postId}"]`);
+        }
+        if (postNumber) selectors.push(`[data-post-number="${postNumber}"]`);
+        if (postId) selectors.push(`article[data-post-id="${postId}"]`);
+        if (postNumber) selectors.push(`article[data-post-number="${postNumber}"]`);
+        return selectors;
+    }
+
+    function getTopicSearchTargetKey(target) {
+        if (!target) return '';
+        return [
+            normalizeTitleText(target.topicId || target.topic_id),
+            normalizeTitleText(target.postId || target.id || target.post_id),
+            normalizeTitleText(target.postNumber || target.post_number),
+        ].join(':');
     }
 
     function normalizeTopicSearchResults(data) {
@@ -136,19 +171,25 @@
                 author: normalizeTitleText(post.name) || normalizeTitleText(post.username) || '未知用户',
                 blurb: stripHtmlToText(post.blurb),
                 createdAt: post.created_at || '',
+                flatUrl: '',
                 id: post.id,
+                nestedUrl: '',
                 postNumber: post.post_number,
                 topicId: post.topic_id,
-                url: '',
                 username: normalizeTitleText(post.username),
             };
-            result.url = getTopicSearchResultUrl(result, topicSlug);
+            result.flatUrl = getTopicSearchFlatUrl(result, topicSlug);
+            result.nestedUrl = getTopicSearchNestedUrl(result, topicSlug);
             return result;
-        }).filter((result) => result.topicId && result.postNumber && result.url);
+        }).filter((result) => result.topicId && result.postNumber && result.flatUrl && result.nestedUrl);
     }
 
     function shouldBypassNestedRewrite(link) {
         return !!(link && link.dataset && link.dataset.linuxdoTopicSearchFlat === 'true');
+    }
+
+    function isNestedTopicSearchLink(link) {
+        return !!(link && link.dataset && link.dataset.linuxdoTopicSearchNested === 'true');
     }
 
     function getSessionStorage() {
@@ -165,6 +206,73 @@
         storage.setItem(ALLOW_FLAT_TOPIC_KEY, topicId);
     }
 
+    function rememberNestedFloorBypass(topicId) {
+        let storage = getSessionStorage();
+        if (!storage || !topicId) return;
+        storage.setItem(ALLOW_NESTED_FLOOR_TOPIC_KEY, topicId);
+    }
+
+    function rememberTopicSearchTarget(link) {
+        let storage = getSessionStorage();
+        if (!storage || !link || !link.dataset) return;
+
+        let target = {
+            expiresAt: Date.now() + 60000,
+            postId: normalizeTitleText(link.dataset.linuxdoPostId),
+            postNumber: normalizeTitleText(link.dataset.linuxdoPostNumber),
+            topicId: normalizeTitleText(link.dataset.linuxdoTopicId),
+        };
+
+        if (!target.topicId || (!target.postId && !target.postNumber)) return;
+        handledTopicSearchTargetKey = '';
+        storage.setItem(TOPIC_SEARCH_TARGET_KEY, JSON.stringify(target));
+    }
+
+    function getStoredTopicSearchTarget() {
+        let storage = getSessionStorage();
+        if (!storage) return null;
+
+        let rawTarget = storage.getItem(TOPIC_SEARCH_TARGET_KEY);
+        if (!rawTarget) return null;
+
+        try {
+            let target = JSON.parse(rawTarget);
+            if (!target || !target.topicId || target.expiresAt < Date.now()) {
+                storage.removeItem(TOPIC_SEARCH_TARGET_KEY);
+                return null;
+            }
+            return target;
+        } catch (e) {
+            storage.removeItem(TOPIC_SEARCH_TARGET_KEY);
+            return null;
+        }
+    }
+
+    function forgetTopicSearchTarget() {
+        let storage = getSessionStorage();
+        if (storage) storage.removeItem(TOPIC_SEARCH_TARGET_KEY);
+    }
+
+    function getUrlTopicSearchTarget() {
+        try {
+            let url = new URL(window.location.href);
+            if (!url.pathname.startsWith('/n/')) return null;
+
+            let topicId = getTopicIdFromPath(url.pathname);
+            let postId = normalizeTitleText(url.searchParams.get('linuxdo_search_post_id'));
+            let postNumber = normalizeTitleText(url.searchParams.get('linuxdo_search_post_number'));
+            if (!topicId || (!postId && !postNumber)) return null;
+
+            return { topicId, postId, postNumber };
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function getPendingTopicSearchTarget() {
+        return getStoredTopicSearchTarget() || getUrlTopicSearchTarget();
+    }
+
     function consumeFlatViewBypass(topicId) {
         let storage = getSessionStorage();
         if (!storage || !topicId) return false;
@@ -173,6 +281,17 @@
         if (!storedTopicId) return false;
 
         storage.removeItem(ALLOW_FLAT_TOPIC_KEY);
+        return storedTopicId === topicId;
+    }
+
+    function consumeNestedFloorBypass(topicId) {
+        let storage = getSessionStorage();
+        if (!storage || !topicId) return false;
+
+        let storedTopicId = storage.getItem(ALLOW_NESTED_FLOOR_TOPIC_KEY);
+        if (!storedTopicId) return false;
+
+        storage.removeItem(ALLOW_NESTED_FLOOR_TOPIC_KEY);
         return storedTopicId === topicId;
     }
 
@@ -243,6 +362,47 @@
     function scheduleTitleRestore() {
         [100, 500, 1500, 3000].forEach((delay) => {
             setTimeout(restoreTopicTitleIfNeeded, delay);
+        });
+    }
+
+    function findTopicSearchTargetElement(target) {
+        let selectors = getTopicSearchTargetSelectors(target);
+        for (let selector of selectors) {
+            let node = document.querySelector(selector);
+            if (!node) continue;
+            return node.closest('article, .topic-post, .post-stream-item, .boxed, .reply') || node;
+        }
+        return null;
+    }
+
+    function scrollToTopicSearchTarget() {
+        if (!window.location.pathname.startsWith('/n/')) return false;
+
+        let target = getPendingTopicSearchTarget();
+        if (!target) return false;
+
+        let targetKey = getTopicSearchTargetKey(target);
+        if (targetKey && targetKey === handledTopicSearchTargetKey) return false;
+
+        let currentTopicId = getTopicIdFromPath(window.location.pathname);
+        if (target.topicId && currentTopicId && target.topicId !== currentTopicId) return false;
+
+        let targetNode = findTopicSearchTargetElement(target);
+        if (!targetNode) return false;
+
+        if (targetNode.classList) targetNode.classList.add('linuxdo-topic-search-target-hit');
+        targetNode.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        setTimeout(() => {
+            if (targetNode.classList) targetNode.classList.remove('linuxdo-topic-search-target-hit');
+        }, 2600);
+        handledTopicSearchTargetKey = targetKey;
+        forgetTopicSearchTarget();
+        return true;
+    }
+
+    function scheduleTopicSearchTargetScroll() {
+        [100, 350, 800, 1500, 3000, 5000].forEach((delay) => {
+            setTimeout(scrollToTopicSearchTarget, delay);
         });
     }
 
@@ -382,13 +542,6 @@
                 padding: 0.75rem 0.875rem;
                 border-top: 1px solid var(--primary-low, #d6d6d6);
                 color: inherit;
-                text-decoration: none;
-            }
-
-            .linuxdo-topic-search-result:hover,
-            .linuxdo-topic-search-result:focus {
-                background: var(--primary-very-low, #f7f7f7);
-                outline: none;
             }
 
             .linuxdo-topic-search-meta {
@@ -409,6 +562,45 @@
                 color: var(--primary, #222);
                 font-size: 0.94rem;
                 line-height: 1.45;
+            }
+
+            .linuxdo-topic-search-actions {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 0.5rem;
+                margin-top: 0.65rem;
+            }
+
+            .linuxdo-topic-search-action {
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                min-height: 2rem;
+                border: 1px solid var(--primary-low-mid, #bdbdbd);
+                border-radius: 6px;
+                color: var(--primary, #222);
+                font-size: 0.86rem;
+                font-weight: 600;
+                line-height: 1.2;
+                padding: 0.35rem 0.65rem;
+                text-decoration: none;
+            }
+
+            .linuxdo-topic-search-action:hover,
+            .linuxdo-topic-search-action:focus {
+                background: var(--primary-very-low, #f7f7f7);
+                outline: none;
+            }
+
+            .linuxdo-topic-search-action-flat {
+                border-color: var(--tertiary, #0088cc);
+                color: var(--tertiary, #0088cc);
+            }
+
+            .linuxdo-topic-search-target-hit {
+                outline: 2px solid var(--tertiary, #0088cc);
+                outline-offset: 4px;
+                scroll-margin-top: 5rem;
             }
 
             @media (max-width: 600px) {
@@ -600,16 +792,16 @@
 
         results.forEach((result) => {
             let item = document.createElement('li');
-            let link = document.createElement('a');
+            let resultBody = document.createElement('div');
             let meta = document.createElement('div');
             let post = document.createElement('span');
             let author = document.createElement('span');
             let blurb = document.createElement('div');
+            let actions = document.createElement('div');
+            let nestedLink = document.createElement('a');
+            let flatLink = document.createElement('a');
 
-            link.className = 'linuxdo-topic-search-result';
-            link.href = result.url;
-            link.dataset.linuxdoTopicSearchFlat = 'true';
-            link.title = `打开第 ${result.postNumber} 楼`;
+            resultBody.className = 'linuxdo-topic-search-result';
 
             meta.className = 'linuxdo-topic-search-meta';
             post.className = 'linuxdo-topic-search-post';
@@ -619,11 +811,31 @@
             blurb.className = 'linuxdo-topic-search-blurb';
             blurb.textContent = result.blurb || '无摘要';
 
+            actions.className = 'linuxdo-topic-search-actions';
+
+            nestedLink.className = 'linuxdo-topic-search-action linuxdo-topic-search-action-nested';
+            nestedLink.href = result.nestedUrl;
+            nestedLink.dataset.linuxdoTopicSearchNested = 'true';
+            nestedLink.dataset.linuxdoTopicId = result.topicId;
+            nestedLink.dataset.linuxdoPostId = result.id;
+            nestedLink.dataset.linuxdoPostNumber = result.postNumber;
+            nestedLink.textContent = '嵌套查看';
+            nestedLink.title = `以嵌套评论区打开第 ${result.postNumber} 楼`;
+
+            flatLink.className = 'linuxdo-topic-search-action linuxdo-topic-search-action-flat';
+            flatLink.href = result.flatUrl;
+            flatLink.dataset.linuxdoTopicSearchFlat = 'true';
+            flatLink.textContent = '平面查看';
+            flatLink.title = `以平面图打开第 ${result.postNumber} 楼`;
+
             meta.appendChild(post);
             meta.appendChild(author);
-            link.appendChild(meta);
-            link.appendChild(blurb);
-            item.appendChild(link);
+            actions.appendChild(nestedLink);
+            actions.appendChild(flatLink);
+            resultBody.appendChild(meta);
+            resultBody.appendChild(blurb);
+            resultBody.appendChild(actions);
+            item.appendChild(resultBody);
             list.appendChild(item);
         });
     }
@@ -660,7 +872,7 @@
 
                 let results = normalizeTopicSearchResults(data);
                 renderTopicSearchResults(results);
-                setTopicSearchStatus(results.length ? `找到 ${results.length} 条结果。点击结果会精确打开对应楼层。` : '没有找到匹配结果。');
+                setTopicSearchStatus(results.length ? `找到 ${results.length} 条结果。嵌套查看直接打开树形楼层，平面查看打开平面楼层。` : '没有找到匹配结果。');
             })
             .catch((error) => {
                 if (error && error.name === 'AbortError') return;
@@ -681,16 +893,23 @@
             window.history[methodName] = function () {
                 let result = originalMethod.apply(this, arguments);
                 scheduleTopicSearchUiRefresh();
+                scheduleTopicSearchTargetScroll();
                 return result;
             };
         });
 
-        window.addEventListener('popstate', scheduleTopicSearchUiRefresh);
+        window.addEventListener('popstate', () => {
+            scheduleTopicSearchUiRefresh();
+            scheduleTopicSearchTargetScroll();
+        });
     }
 
     function observeTopicSearchHeader() {
         if (topicSearchObserver || !document.body) return;
-        topicSearchObserver = new MutationObserver(scheduleTopicSearchUiRefresh);
+        topicSearchObserver = new MutationObserver(() => {
+            scheduleTopicSearchUiRefresh();
+            scrollToTopicSearchTarget();
+        });
         topicSearchObserver.observe(document.body, { childList: true, subtree: true });
     }
 
@@ -705,7 +924,7 @@
     // 1. 处理页面初次加载或外部直接跳转
     if (window.location.pathname.startsWith('/t/')) {
         let currentTopicId = getTopicIdFromPath(window.location.pathname);
-        if (!consumeFlatViewBypass(currentTopicId)) {
+        if (!consumeFlatViewBypass(currentTopicId) && !consumeNestedFloorBypass(currentTopicId)) {
             let targetUrl = getNestedUrl(window.location.href);
             if (targetUrl !== window.location.href) {
                 window.location.replace(targetUrl);
@@ -720,6 +939,12 @@
 
         let href = a.getAttribute('href');
         if (!href) return;
+
+        if (isNestedTopicSearchLink(a)) {
+            rememberNestedFloorBypass(getTopicIdFromUrl(href));
+            closeTopicSearchPanel();
+            return;
+        }
 
         // 搜索结果需要精确打开对应楼层，因此允许这类链接临时使用 Discourse 原始平面话题地址。
         if (shouldBypassNestedRewrite(a)) {
@@ -779,11 +1004,14 @@
     runWhenBodyReady(() => {
         refreshTopicSearchUi();
         observeTopicSearchHeader();
+        scheduleTopicSearchTargetScroll();
     });
 
     if (typeof window.__LINUXDO_COMMENT_TEST_HOOK__ === 'function') {
         window.__LINUXDO_COMMENT_TEST_HOOK__({
             buildTopicSearchEndpoint,
+            getTopicSearchTargetSelectors,
+            isNestedTopicSearchLink,
             normalizeTopicSearchResults,
             shouldBypassNestedRewrite,
             shouldShowTopicSearchButton,
