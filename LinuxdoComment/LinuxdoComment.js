@@ -15,13 +15,16 @@
     const SITE_TITLE = 'LINUX DO';
     const ALLOW_FLAT_TOPIC_KEY = 'linuxdo-comment-allow-flat-topic-id';
     const ALLOW_NESTED_FLOOR_TOPIC_KEY = 'linuxdo-comment-allow-nested-floor-topic-id';
+    const TOPIC_TITLE_BY_ID_KEY = 'linuxdo-comment-topic-title-by-id';
     const TOPIC_SEARCH_TARGET_KEY = 'linuxdo-comment-topic-search-target';
     const TOPIC_SEARCH_BUTTON_ID = 'linuxdo-topic-search-entry';
     const TOPIC_SEARCH_PANEL_ID = 'linuxdo-topic-search-panel';
     const TOPIC_SEARCH_STYLE_ID = 'linuxdo-topic-search-style';
+    const PRIVATE_MESSAGE_ARCHETYPE = 'private_message';
     let forceScrollTop = false; // 用于标记是否需要强制滚动到顶部
     let pendingTopicTitle = '';
     let pendingTopicId = '';
+    let topicArchetypeRequests = {};
     let topicTitleRequest = null;
     let topicTitleRequestId = '';
     let topicSearchAbortController = null;
@@ -38,6 +41,30 @@
         return normalizeTitleText(title).replace(/\s+-\s+LINUX DO$/i, '');
     }
 
+    function isPrivateMessageTopicData(data) {
+        return normalizeTitleText(data && data.archetype) === PRIVATE_MESSAGE_ARCHETYPE;
+    }
+
+    function isPrivateMessageTopicPage() {
+        return !!(
+            document.body &&
+            document.body.classList &&
+            document.body.classList.contains('archetype-private_message')
+        );
+    }
+
+    function isPrivateMessageListPath(pathname) {
+        return /^\/u\/[^/]+\/messages(?:\/|$)/.test(normalizeTitleText(pathname));
+    }
+
+    function isPrivateMessageLinkContext(link) {
+        return !!(
+            link &&
+            typeof link.closest === 'function' &&
+            link.closest('.archetype-private_message, [data-archetype="private_message"], [data-topic-archetype="private_message"]')
+        );
+    }
+
     function getTopicTitleFromLink(link) {
         let title = normalizeTitleText(link.getAttribute('title') || link.getAttribute('aria-label'));
         if (!title) title = normalizeTitleText(link.textContent);
@@ -50,6 +77,34 @@
 
         let metaTitle = document.querySelector('meta[property="og:title"], meta[name="twitter:title"]');
         return stripSiteTitle(metaTitle ? metaTitle.getAttribute('content') || metaTitle.content : '');
+    }
+
+    function getRememberedTopicTitles() {
+        let storage = getSessionStorage();
+        if (!storage) return {};
+
+        try {
+            let value = JSON.parse(storage.getItem(TOPIC_TITLE_BY_ID_KEY) || '{}');
+            return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+        } catch (e) {
+            storage.removeItem(TOPIC_TITLE_BY_ID_KEY);
+            return {};
+        }
+    }
+
+    function rememberTopicTitle(topicId, topicTitle) {
+        let storage = getSessionStorage();
+        let cleanTopicId = normalizeTitleText(topicId);
+        let cleanTitle = stripSiteTitle(topicTitle);
+        if (!storage || !cleanTopicId || !cleanTitle) return;
+
+        let titles = getRememberedTopicTitles();
+        titles[cleanTopicId] = cleanTitle;
+        storage.setItem(TOPIC_TITLE_BY_ID_KEY, JSON.stringify(titles));
+    }
+
+    function getRememberedTopicTitle(topicId) {
+        return stripSiteTitle(getRememberedTopicTitles()[normalizeTitleText(topicId)]);
     }
 
     function getExpectedDocumentTitle(topicTitle) {
@@ -78,6 +133,28 @@
         } catch (e) {
             return '';
         }
+    }
+
+    function shouldSkipNestedRewriteForPrivateMessage(linkOrHref) {
+        let href = typeof linkOrHref === 'string' ?
+            linkOrHref :
+            linkOrHref && typeof linkOrHref.getAttribute === 'function' ? linkOrHref.getAttribute('href') : '';
+
+        if (isPrivateMessageListPath(window.location.pathname)) return true;
+        if (isPrivateMessageLinkContext(typeof linkOrHref === 'string' ? null : linkOrHref)) return true;
+        if (!isPrivateMessageTopicPage()) return false;
+
+        let linkTopicId = getTopicIdFromUrl(href);
+        let currentTopicId = getTopicIdFromPath(window.location.pathname);
+        return !!(linkTopicId && currentTopicId && linkTopicId === currentTopicId);
+    }
+
+    function shouldKeepCanonicalTopicLink(event, link) {
+        let target = normalizeTitleText(link && typeof link.getAttribute === 'function' ? link.getAttribute('target') : '').toLowerCase();
+        return !!(
+            target === '_blank' ||
+            (event && (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button === 1))
+        );
     }
 
     function shouldShowTopicSearchButton(pathname) {
@@ -336,11 +413,40 @@
         return topicTitleRequest;
     }
 
+    function fetchTopicArchetypeFromApi(topicId) {
+        if (!topicId || typeof fetch !== 'function') return Promise.resolve('');
+        if (topicArchetypeRequests[topicId]) return topicArchetypeRequests[topicId];
+
+        topicArchetypeRequests[topicId] = fetch(`/t/${topicId}.json`, {
+            credentials: 'same-origin',
+            headers: { Accept: 'application/json' },
+        })
+            .then((response) => {
+                if (!response || !response.ok) return null;
+                return response.json();
+            })
+            .then((data) => {
+                rememberTopicTitle(topicId, data && data.title);
+                return normalizeTitleText(data && data.archetype);
+            })
+            .catch((e) => {
+                console.error('树形评论区脚本获取话题类型失败:', e);
+                return '';
+            })
+            .then((archetype) => {
+                delete topicArchetypeRequests[topicId];
+                return archetype;
+            });
+
+        return topicArchetypeRequests[topicId];
+    }
+
     function restoreTopicTitleIfNeeded() {
         if (!window.location.pathname.startsWith('/n/')) return false;
 
         let currentTopicId = getTopicIdFromPath(window.location.pathname);
         let topicTitle = pendingTopicId === currentTopicId ? pendingTopicTitle : '';
+        if (!topicTitle) topicTitle = getRememberedTopicTitle(currentTopicId);
         if (!topicTitle) topicTitle = getTopicTitleFromPage();
         if (topicTitle) {
             pendingTopicId = currentTopicId;
@@ -921,15 +1027,28 @@
         }
     }
 
+    function redirectToNestedTopicIfAllowed() {
+        let currentTopicId = getTopicIdFromPath(window.location.pathname);
+        if (!currentTopicId) return;
+        if (consumeFlatViewBypass(currentTopicId) || consumeNestedFloorBypass(currentTopicId)) return;
+        if (isPrivateMessageTopicPage()) return;
+
+        let targetUrl = getNestedUrl(window.location.href);
+        if (targetUrl === window.location.href) return;
+
+        fetchTopicArchetypeFromApi(currentTopicId).then((archetype) => {
+            if (archetype === PRIVATE_MESSAGE_ARCHETYPE || !archetype) return;
+            if (!window.location.pathname.startsWith('/t/')) return;
+            if (getTopicIdFromPath(window.location.pathname) !== currentTopicId) return;
+
+            let freshTargetUrl = getNestedUrl(window.location.href);
+            if (freshTargetUrl !== window.location.href) window.location.replace(freshTargetUrl);
+        });
+    }
+
     // 1. 处理页面初次加载或外部直接跳转
     if (window.location.pathname.startsWith('/t/')) {
-        let currentTopicId = getTopicIdFromPath(window.location.pathname);
-        if (!consumeFlatViewBypass(currentTopicId) && !consumeNestedFloorBypass(currentTopicId)) {
-            let targetUrl = getNestedUrl(window.location.href);
-            if (targetUrl !== window.location.href) {
-                window.location.replace(targetUrl);
-            }
-        }
+        redirectToNestedTopicIfAllowed();
     }
 
     // 2. 拦截单页应用(SPA)内的所有链接点击
@@ -960,6 +1079,9 @@
 
         // 如果点击的是帖子链接
         if (href.startsWith('/t/') || href.startsWith('https://linux.do/t/')) {
+            if (shouldSkipNestedRewriteForPrivateMessage(a)) return;
+            if (shouldKeepCanonicalTopicLink(e, a)) return;
+
             let newHref = getNestedUrl(href);
             if (newHref !== href) {
                 a.setAttribute('href', newHref);
@@ -1011,10 +1133,17 @@
         window.__LINUXDO_COMMENT_TEST_HOOK__({
             buildTopicSearchEndpoint,
             getTopicSearchTargetSelectors,
+            isPrivateMessageTopicData,
+            isPrivateMessageTopicPage,
             isNestedTopicSearchLink,
+            getDocumentTitle: () => document.title,
+            rememberTopicTitle,
             normalizeTopicSearchResults,
             shouldBypassNestedRewrite,
+            shouldKeepCanonicalTopicLink,
+            shouldSkipNestedRewriteForPrivateMessage,
             shouldShowTopicSearchButton,
+            restoreTopicTitleIfNeeded,
         });
     }
 })();
