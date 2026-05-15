@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         LINUX DO 默认树形评论区1.6
+// @name         LINUX DO 默认树形评论区1.6.1
 // @namespace    http://tampermonkey.net/
-// @version      1.6
+// @version      1.6.1
 // @description  在访问 LINUX DO 帖子时，默认使用树形评论区显示，并在话题页提供全回复话题内搜索
 // @author       You
 // @match        *://linux.do/*
@@ -380,6 +380,8 @@
         ].filter(Boolean).join(' ')).toLowerCase();
 
         return label.includes('view as flat') ||
+            label.includes('以平面方式查看') ||
+            label.includes('平面方式查看') ||
             label.includes('以平面图查看') ||
             label.includes('平面图查看') ||
             label.includes('平面视图') ||
