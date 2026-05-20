@@ -1,12 +1,13 @@
 // ==UserScript==
-// @name         LINUX DO 默认树形评论区1.6.1
-// @namespace    http://tampermonkey.net/
-// @version      1.6.1
+// @name         LINUX DO 默认树形评论区1.6.2
+// @namespace    https://greasyfork.org/users/1407672
+// @version      1.6.2
 // @description  在访问 LINUX DO 帖子时，默认使用树形评论区显示，并在话题页提供全回复话题内搜索
-// @author       You
+// @author       xiang0731
 // @match        *://linux.do/*
 // @grant        none
 // @run-at       document-start
+// @license      MIT
 // ==/UserScript==
 
 (function () {
@@ -21,10 +22,13 @@
     const TOPIC_SEARCH_PANEL_ID = 'linuxdo-topic-search-panel';
     const TOPIC_SEARCH_STYLE_ID = 'linuxdo-topic-search-style';
     const PRIVATE_MESSAGE_ARCHETYPE = 'private_message';
+    const BANNER_ARCHETYPE = 'banner';
+    const POST_VOTING_SUBTYPE = 'question_answer';
+    const NESTED_REWRITE_PRECHECKED_KEY = 'linuxdoNestedRewritePrechecked';
     let forceScrollTop = false; // 用于标记是否需要强制滚动到顶部
     let pendingTopicTitle = '';
     let pendingTopicId = '';
-    let topicArchetypeRequests = {};
+    let topicDataRequests = {};
     let topicTitleRequest = null;
     let topicTitleRequestId = '';
     let topicSearchAbortController = null;
@@ -45,6 +49,48 @@
         return normalizeTitleText(data && data.archetype) === PRIVATE_MESSAGE_ARCHETYPE;
     }
 
+    function hasTruthyTopicDataValue(value) {
+        if (value === true) return true;
+        if (typeof value === 'string') return normalizeTitleText(value).toLowerCase() === 'true';
+        if (Array.isArray(value)) return value.length > 0;
+        return !!(value && typeof value === 'object' && Object.keys(value).length > 0);
+    }
+
+    function postContainsPollData(post) {
+        if (!post || typeof post !== 'object') return false;
+        if (hasTruthyTopicDataValue(post.polls) || hasTruthyTopicDataValue(post.polls_votes)) return true;
+
+        let customFields = post.custom_fields || {};
+        return hasTruthyTopicDataValue(customFields.polls) ||
+            hasTruthyTopicDataValue(customFields.has_polls) ||
+            hasTruthyTopicDataValue(customFields.poll_enabled);
+    }
+
+    function isPollTopicData(data) {
+        let posts = data && data.post_stream && Array.isArray(data.post_stream.posts) ?
+            data.post_stream.posts :
+            [];
+        return posts.some(postContainsPollData);
+    }
+
+    function isPostVotingTopicData(data) {
+        return !!(
+            data &&
+            (
+                hasTruthyTopicDataValue(data.is_post_voting) ||
+                normalizeTitleText(data.subtype) === POST_VOTING_SUBTYPE
+            )
+        );
+    }
+
+    function isUnsupportedNestedTopicData(data) {
+        let archetype = normalizeTitleText(data && data.archetype);
+        return archetype === PRIVATE_MESSAGE_ARCHETYPE ||
+            archetype === BANNER_ARCHETYPE ||
+            isPostVotingTopicData(data) ||
+            isPollTopicData(data);
+    }
+
     function isPrivateMessageTopicPage() {
         return !!(
             document.body &&
@@ -53,15 +99,50 @@
         );
     }
 
+    function bodyHasAnyClass(classNames) {
+        return !!(
+            document.body &&
+            document.body.classList &&
+            classNames.some((className) => document.body.classList.contains(className))
+        );
+    }
+
+    function isUnsupportedNestedTopicPage() {
+        return bodyHasAnyClass([
+            'archetype-private_message',
+            'archetype-banner',
+            'post-voting-topic',
+            'topic-post-voting',
+            'is-post-voting',
+            'has-poll',
+        ]);
+    }
+
     function isPrivateMessageListPath(pathname) {
         return /^\/u\/[^/]+\/messages(?:\/|$)/.test(normalizeTitleText(pathname));
     }
 
-    function isPrivateMessageLinkContext(link) {
+    function isUnsupportedNestedLinkContext(link) {
         return !!(
             link &&
             typeof link.closest === 'function' &&
-            link.closest('.archetype-private_message, [data-archetype="private_message"], [data-topic-archetype="private_message"]')
+            link.closest([
+                '.archetype-private_message',
+                '[data-archetype="private_message"]',
+                '[data-topic-archetype="private_message"]',
+                '.archetype-banner',
+                '[data-archetype="banner"]',
+                '[data-topic-archetype="banner"]',
+                '.post-voting-topic',
+                '.topic-post-voting',
+                '.is-post-voting',
+                '[data-is-post-voting="true"]',
+                '[data-topic-is-post-voting="true"]',
+                '[data-subtype="question_answer"]',
+                '[data-topic-subtype="question_answer"]',
+                '.poll',
+                '[data-poll-name]',
+            ].join(', '))
         );
     }
 
@@ -135,18 +216,22 @@
         }
     }
 
-    function shouldSkipNestedRewriteForPrivateMessage(linkOrHref) {
+    function shouldSkipNestedRewriteForUnsupportedTopic(linkOrHref) {
         let href = typeof linkOrHref === 'string' ?
             linkOrHref :
             linkOrHref && typeof linkOrHref.getAttribute === 'function' ? linkOrHref.getAttribute('href') : '';
 
         if (isPrivateMessageListPath(window.location.pathname)) return true;
-        if (isPrivateMessageLinkContext(typeof linkOrHref === 'string' ? null : linkOrHref)) return true;
-        if (!isPrivateMessageTopicPage()) return false;
+        if (isUnsupportedNestedLinkContext(typeof linkOrHref === 'string' ? null : linkOrHref)) return true;
+        if (!isUnsupportedNestedTopicPage()) return false;
 
         let linkTopicId = getTopicIdFromUrl(href);
         let currentTopicId = getTopicIdFromPath(window.location.pathname);
         return !!(linkTopicId && currentTopicId && linkTopicId === currentTopicId);
+    }
+
+    function shouldSkipNestedRewriteForPrivateMessage(linkOrHref) {
+        return shouldSkipNestedRewriteForUnsupportedTopic(linkOrHref);
     }
 
     function shouldKeepCanonicalTopicLink(event, link) {
@@ -415,11 +500,11 @@
         return topicTitleRequest;
     }
 
-    function fetchTopicArchetypeFromApi(topicId) {
-        if (!topicId || typeof fetch !== 'function') return Promise.resolve('');
-        if (topicArchetypeRequests[topicId]) return topicArchetypeRequests[topicId];
+    function fetchTopicDataForNestedRewrite(topicId) {
+        if (!topicId || typeof fetch !== 'function') return Promise.resolve(null);
+        if (topicDataRequests[topicId]) return topicDataRequests[topicId];
 
-        topicArchetypeRequests[topicId] = fetch(`/t/${topicId}.json`, {
+        topicDataRequests[topicId] = fetch(`/t/${topicId}.json`, {
             credentials: 'same-origin',
             headers: { Accept: 'application/json' },
         })
@@ -429,18 +514,18 @@
             })
             .then((data) => {
                 rememberTopicTitle(topicId, data && data.title);
-                return normalizeTitleText(data && data.archetype);
+                return data && typeof data === 'object' ? data : null;
             })
             .catch((e) => {
-                console.error('树形评论区脚本获取话题类型失败:', e);
-                return '';
+                console.error('树形评论区脚本获取话题数据失败:', e);
+                return null;
             })
-            .then((archetype) => {
-                delete topicArchetypeRequests[topicId];
-                return archetype;
+            .then((data) => {
+                delete topicDataRequests[topicId];
+                return data;
             });
 
-        return topicArchetypeRequests[topicId];
+        return topicDataRequests[topicId];
     }
 
     function restoreTopicTitleIfNeeded() {
@@ -543,6 +628,72 @@
             console.error("树形评论区脚本 URL 解析出错:", e);
         }
         return originalUrl;
+    }
+
+    function isTopicLinkHref(href) {
+        return !!(
+            href &&
+            (
+                href.startsWith('/t/') ||
+                href.startsWith(`${window.location.origin}/t/`) ||
+                href.startsWith('https://linux.do/t/')
+            )
+        );
+    }
+
+    function markTopicNavigationIntent(link, targetHref) {
+        pendingTopicId = getTopicIdFromUrl(targetHref);
+        pendingTopicTitle = getTopicTitleFromLink(link);
+        forceScrollTop = true;
+        scheduleTitleRestore();
+        setTimeout(() => { forceScrollTop = false; }, 5000);
+    }
+
+    function applyNestedRewriteToLink(link, originalHref, nestedHref) {
+        if (nestedHref !== originalHref) link.setAttribute('href', nestedHref);
+        markTopicNavigationIntent(link, nestedHref);
+    }
+
+    function stopTopicClickForPrecheck(event) {
+        if (event && typeof event.preventDefault === 'function') event.preventDefault();
+        if (event && typeof event.stopImmediatePropagation === 'function') {
+            event.stopImmediatePropagation();
+        } else if (event && typeof event.stopPropagation === 'function') {
+            event.stopPropagation();
+        }
+    }
+
+    function replayTopicLinkClick(link) {
+        if (!link) return;
+        if (link.dataset) link.dataset[NESTED_REWRITE_PRECHECKED_KEY] = 'true';
+
+        if (typeof link.click === 'function') {
+            link.click();
+            return;
+        }
+
+        let href = typeof link.getAttribute === 'function' ? link.getAttribute('href') : '';
+        if (href) window.location.href = href;
+    }
+
+    function precheckAndReplayTopicLink(link, originalHref, nestedHref) {
+        let topicId = getTopicIdFromUrl(originalHref);
+        if (!topicId) {
+            applyNestedRewriteToLink(link, originalHref, nestedHref);
+            replayTopicLinkClick(link);
+            return;
+        }
+
+        fetchTopicDataForNestedRewrite(topicId).then((topicData) => {
+            if (!topicData || isUnsupportedNestedTopicData(topicData)) {
+                if (topicData) rememberFlatViewBypass(topicId);
+                replayTopicLinkClick(link);
+                return;
+            }
+
+            applyNestedRewriteToLink(link, originalHref, nestedHref);
+            replayTopicLinkClick(link);
+        });
     }
 
     function injectTopicSearchStyles() {
@@ -1038,8 +1189,8 @@
         let targetUrl = getNestedUrl(window.location.href);
         if (targetUrl === window.location.href) return;
 
-        fetchTopicArchetypeFromApi(currentTopicId).then((archetype) => {
-            if (archetype === PRIVATE_MESSAGE_ARCHETYPE || !archetype) return;
+        fetchTopicDataForNestedRewrite(currentTopicId).then((topicData) => {
+            if (!topicData || isUnsupportedNestedTopicData(topicData)) return;
             if (!window.location.pathname.startsWith('/t/')) return;
             if (getTopicIdFromPath(window.location.pathname) !== currentTopicId) return;
 
@@ -1080,21 +1231,25 @@
         }
 
         // 如果点击的是帖子链接
-        if (href.startsWith('/t/') || href.startsWith('https://linux.do/t/')) {
-            if (shouldSkipNestedRewriteForPrivateMessage(a)) return;
+        if (isTopicLinkHref(href)) {
+            if (a.dataset && a.dataset[NESTED_REWRITE_PRECHECKED_KEY] === 'true') {
+                delete a.dataset[NESTED_REWRITE_PRECHECKED_KEY];
+                return;
+            }
+
+            if (shouldSkipNestedRewriteForUnsupportedTopic(a)) return;
             if (shouldKeepCanonicalTopicLink(e, a)) return;
 
             let newHref = getNestedUrl(href);
-            if (newHref !== href) {
-                a.setAttribute('href', newHref);
+            if (newHref === href) return;
+
+            if (getTopicIdFromUrl(href) && typeof fetch === 'function') {
+                stopTopicClickForPrecheck(e);
+                precheckAndReplayTopicLink(a, href, newHref);
+                return;
             }
-            pendingTopicId = getTopicIdFromUrl(newHref);
-            pendingTopicTitle = getTopicTitleFromLink(a);
-            // 记录已点击，准备在页面渲染后滚动到顶部
-            forceScrollTop = true;
-            scheduleTitleRestore();
-            // 设置一个兜底：5秒后自动取消标记，防止影响后续的普通操作
-            setTimeout(() => { forceScrollTop = false; }, 5000);
+
+            applyNestedRewriteToLink(a, href, newHref);
         }
     }, true);
 
@@ -1138,12 +1293,14 @@
             isPrivateMessageTopicData,
             isPrivateMessageTopicPage,
             isNestedTopicSearchLink,
+            isUnsupportedNestedTopicData,
             getDocumentTitle: () => document.title,
             rememberTopicTitle,
             normalizeTopicSearchResults,
             shouldBypassNestedRewrite,
             shouldKeepCanonicalTopicLink,
             shouldSkipNestedRewriteForPrivateMessage,
+            shouldSkipNestedRewriteForUnsupportedTopic,
             shouldShowTopicSearchButton,
             restoreTopicTitleIfNeeded,
         });
