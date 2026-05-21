@@ -1,13 +1,16 @@
 // ==UserScript==
-// @name         LINUX DO 默认树形评论区1.6.2
+// @name         LINUX DO 默认树形评论区
 // @namespace    https://greasyfork.org/users/1407672
-// @version      1.6.2
+// @version      1.6.4
 // @description  在访问 LINUX DO 帖子时，默认使用树形评论区显示，并在话题页提供全回复话题内搜索
 // @author       xiang0731
 // @match        *://linux.do/*
+// @match        *://idcflare.com/*
 // @grant        none
 // @run-at       document-start
 // @license      MIT
+// @downloadURL  https://update.greasyfork.org/scripts/578969/%E9%BB%98%E8%AE%A4%E6%A0%91%E5%BD%A2%E8%AF%84%E8%AE%BA%E5%8C%BA.user.js
+// @updateURL    https://update.greasyfork.org/scripts/578969/%E9%BB%98%E8%AE%A4%E6%A0%91%E5%BD%A2%E8%AF%84%E8%AE%BA%E5%8C%BA.meta.js
 // ==/UserScript==
 
 (function () {
@@ -214,6 +217,112 @@
         } catch (e) {
             return '';
         }
+    }
+
+    function isKnownTopicUrl(urlValue) {
+        try {
+            let url = new URL(urlValue, window.location.origin);
+            return url.pathname.startsWith('/t/') && (
+                url.hostname === window.location.hostname ||
+                url.hostname === 'linux.do' ||
+                url.hostname === 'idcflare.com'
+            );
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function getElementAttributeValue(element, name) {
+        if (!element || typeof element.getAttribute !== 'function') return '';
+        return normalizeTitleText(element.getAttribute(name));
+    }
+
+    function getElementDataValue(element, datasetNames, attributeNames) {
+        if (!element) return '';
+
+        for (let name of datasetNames) {
+            let value = element.dataset && element.dataset[name];
+            if (normalizeTitleText(value)) return normalizeTitleText(value);
+        }
+
+        for (let name of attributeNames) {
+            let value = getElementAttributeValue(element, name);
+            if (value) return value;
+        }
+
+        return '';
+    }
+
+    function buildTopicHrefFromElementData(element) {
+        let topicId = getElementDataValue(element, ['topicId', 'topic_id', 'linuxdoTopicId'], [
+            'data-topic-id',
+            'data-topic_id',
+            'data-linuxdo-topic-id',
+        ]);
+        if (!topicId) return '';
+
+        let topicSlug = getElementDataValue(element, ['topicSlug', 'slug', 'topic_slug'], [
+            'data-topic-slug',
+            'data-slug',
+            'data-topic_slug',
+        ]);
+        let postNumber = getElementDataValue(element, ['postNumber', 'post_number', 'linuxdoPostNumber'], [
+            'data-post-number',
+            'data-post_number',
+            'data-linuxdo-post-number',
+        ]);
+        let basePath = topicSlug ? `/t/${topicSlug}/${topicId}` : `/t/${topicId}`;
+        return postNumber ? `${basePath}/${postNumber}` : basePath;
+    }
+
+    function getElementNavigationHrefCandidates(element) {
+        if (!element) return [];
+
+        let candidates = [
+            { href: getElementAttributeValue(element, 'href'), source: 'href' },
+            { href: getElementAttributeValue(element, 'data-url'), source: 'data-url' },
+            { href: getElementAttributeValue(element, 'data-href'), source: 'data-href' },
+            { href: getElementAttributeValue(element, 'data-topic-url'), source: 'data-topic-url' },
+            { href: getElementDataValue(element, ['url'], []), source: 'dataset-url' },
+            { href: getElementDataValue(element, ['href'], []), source: 'dataset-href' },
+            { href: getElementDataValue(element, ['topicUrl', 'topic_url'], []), source: 'dataset-topic-url' },
+        ];
+
+        let dataHref = buildTopicHrefFromElementData(element);
+        if (dataHref) candidates.push({ href: dataHref, source: 'topic-data' });
+
+        return candidates.filter((candidate) => candidate.href);
+    }
+
+    function getElementNavigationHref(element) {
+        let candidates = getElementNavigationHrefCandidates(element);
+        let topicCandidate = candidates.find((candidate) => isTopicLinkHref(candidate.href));
+        return topicCandidate ? topicCandidate.href : (candidates[0] ? candidates[0].href : '');
+    }
+
+    function getTopicNavigationTarget(element) {
+        let candidates = getElementNavigationHrefCandidates(element);
+        return candidates.find((candidate) => isTopicLinkHref(candidate.href)) || null;
+    }
+
+    function isUserNotificationOrActivityPath(pathname) {
+        return /^\/(?:u\/[^/]+|my)\/(?:notifications|activity)(?:\/|$)/.test(normalizeTitleText(pathname));
+    }
+
+    function findTopicNavigationElement(target) {
+        if (!target || typeof target.closest !== 'function') return null;
+
+        let link = target.closest('a');
+        if (link) return link;
+
+        let routedElement = target.closest('[data-url], [data-href], [data-topic-url]');
+        if (routedElement) return routedElement;
+
+        if (isUserNotificationOrActivityPath(window.location.pathname)) {
+            return target.closest('[data-topic-id], [data-linuxdo-topic-id]');
+        }
+
+        return null;
     }
 
     function shouldSkipNestedRewriteForUnsupportedTopic(linkOrHref) {
@@ -431,8 +540,36 @@
         }
     }
 
+    function getPostNumberFromNestedPath(pathname) {
+        let match = normalizeTitleText(pathname).match(/^\/n\/(?:[^/]+\/)?\d+\/(\d+)(?:\/|$)/);
+        return match ? match[1] : '';
+    }
+
+    function getPostNumberFromNestedUrl(urlValue) {
+        try {
+            return getPostNumberFromNestedPath(new URL(urlValue, window.location.origin).pathname);
+        } catch (e) {
+            return '';
+        }
+    }
+
+    function getUrlNestedFloorTarget() {
+        try {
+            let url = new URL(window.location.href);
+            if (!url.pathname.startsWith('/n/')) return null;
+
+            let topicId = getTopicIdFromPath(url.pathname);
+            let postNumber = getPostNumberFromNestedPath(url.pathname);
+            if (!topicId || !postNumber) return null;
+
+            return { topicId, postNumber };
+        } catch (e) {
+            return null;
+        }
+    }
+
     function getPendingTopicSearchTarget() {
-        return getStoredTopicSearchTarget() || getUrlTopicSearchTarget();
+        return getStoredTopicSearchTarget() || getUrlTopicSearchTarget() || getUrlNestedFloorTarget();
     }
 
     function consumeFlatViewBypass(topicId) {
@@ -599,30 +736,33 @@
         });
     }
 
-    // 核心转换逻辑：处理链接替换并剥离楼层号
+    // 核心转换逻辑：处理链接替换，并保留楼层号用于定位。
     function getNestedUrl(originalUrl) {
         try {
-            let isRelative = originalUrl.startsWith('/');
-            let baseUrl = isRelative ? window.location.origin : '';
-            let url = new URL(originalUrl, baseUrl || undefined);
+            let isPathRelative = originalUrl.startsWith('/') && !originalUrl.startsWith('//');
+            let url = new URL(originalUrl, window.location.origin);
 
             if (url.pathname.startsWith('/t/')) {
                 let newPath = url.pathname;
 
                 // 1. 匹配带 slug 的标准链接: /t/话题名/帖子ID/楼层号
                 if (/^\/t\/[^/]+\/\d+(?:\/\d+)?\/?$/.test(newPath)) {
-                    newPath = newPath.replace(/^\/t\/([^/]+)\/(\d+)(?:\/\d+)?\/?$/, '/n/$1/$2');
+                    newPath = newPath.replace(/^\/t\/([^/]+)\/(\d+)(?:\/(\d+))?\/?$/, (match, slug, topicId, postNumber) => {
+                        return postNumber ? `/n/${slug}/${topicId}/${postNumber}` : `/n/${slug}/${topicId}`;
+                    });
                 }
                 // 2. 匹配无 slug 的短链接: /t/帖子ID/楼层号
                 else if (/^\/t\/\d+(?:\/\d+)?\/?$/.test(newPath)) {
-                    newPath = newPath.replace(/^\/t\/(\d+)(?:\/\d+)?\/?$/, '/n/$1');
+                    newPath = newPath.replace(/^\/t\/(\d+)(?:\/(\d+))?\/?$/, (match, topicId, postNumber) => {
+                        return postNumber ? `/n/${topicId}/${postNumber}` : `/n/${topicId}`;
+                    });
                 } else {
                     newPath = newPath.replace(/^\/t\//, '/n/');
                 }
 
                 url.pathname = newPath;
                 if (!url.searchParams.has('sort')) url.searchParams.set('sort', 'old');
-                return isRelative ? url.pathname + url.search + url.hash : url.href;
+                return isPathRelative ? url.pathname + url.search + url.hash : url.href;
             }
         } catch (e) {
             console.error("树形评论区脚本 URL 解析出错:", e);
@@ -631,27 +771,45 @@
     }
 
     function isTopicLinkHref(href) {
-        return !!(
-            href &&
-            (
-                href.startsWith('/t/') ||
-                href.startsWith(`${window.location.origin}/t/`) ||
-                href.startsWith('https://linux.do/t/')
-            )
-        );
+        return !!(href && isKnownTopicUrl(href));
     }
 
     function markTopicNavigationIntent(link, targetHref) {
         pendingTopicId = getTopicIdFromUrl(targetHref);
         pendingTopicTitle = getTopicTitleFromLink(link);
-        forceScrollTop = true;
+        forceScrollTop = shouldForceScrollTopForTopicNavigation(targetHref);
+        if (!forceScrollTop) scheduleTopicSearchTargetScroll();
         scheduleTitleRestore();
         setTimeout(() => { forceScrollTop = false; }, 5000);
+    }
+
+    function shouldForceScrollTopForTopicNavigation(targetHref) {
+        return !getPostNumberFromNestedUrl(targetHref);
     }
 
     function applyNestedRewriteToLink(link, originalHref, nestedHref) {
         if (nestedHref !== originalHref) link.setAttribute('href', nestedHref);
         markTopicNavigationIntent(link, nestedHref);
+    }
+
+    function shouldHardNavigateCrossTopicFromNested(targetTopicId) {
+        let currentTopicId = getTopicIdFromPath(window.location.pathname);
+        return !!(
+            window.location.pathname.startsWith('/n/') &&
+            currentTopicId &&
+            targetTopicId &&
+            currentTopicId !== targetTopicId
+        );
+    }
+
+    function hardNavigateToHref(href) {
+        if (!href) return false;
+        if (window.location && typeof window.location.assign === 'function') {
+            window.location.assign(href);
+        } else {
+            window.location.href = href;
+        }
+        return true;
     }
 
     function stopTopicClickForPrecheck(event) {
@@ -676,22 +834,27 @@
         if (href) window.location.href = href;
     }
 
-    function precheckAndReplayTopicLink(link, originalHref, nestedHref) {
+    function precheckAndReplayTopicLink(link, originalHref, nestedHref, options) {
+        options = options || {};
         let topicId = getTopicIdFromUrl(originalHref);
         if (!topicId) {
             applyNestedRewriteToLink(link, originalHref, nestedHref);
+            if (options.forceHardNavigation && hardNavigateToHref(nestedHref)) return;
             replayTopicLinkClick(link);
             return;
         }
 
+        let hardNavigateAfterPrecheck = options.forceHardNavigation || shouldHardNavigateCrossTopicFromNested(topicId);
         fetchTopicDataForNestedRewrite(topicId).then((topicData) => {
             if (!topicData || isUnsupportedNestedTopicData(topicData)) {
                 if (topicData) rememberFlatViewBypass(topicId);
+                if (hardNavigateAfterPrecheck && hardNavigateToHref(originalHref)) return;
                 replayTopicLinkClick(link);
                 return;
             }
 
             applyNestedRewriteToLink(link, originalHref, nestedHref);
+            if (hardNavigateAfterPrecheck && hardNavigateToHref(nestedHref)) return;
             replayTopicLinkClick(link);
         });
     }
@@ -1153,6 +1316,7 @@
                 let result = originalMethod.apply(this, arguments);
                 scheduleTopicSearchUiRefresh();
                 scheduleTopicSearchTargetScroll();
+                redirectToNestedTopicIfAllowed();
                 return result;
             };
         });
@@ -1160,6 +1324,7 @@
         window.addEventListener('popstate', () => {
             scheduleTopicSearchUiRefresh();
             scheduleTopicSearchTargetScroll();
+            redirectToNestedTopicIfAllowed();
         });
     }
 
@@ -1206,10 +1371,10 @@
 
     // 2. 拦截单页应用(SPA)内的所有链接点击
     window.addEventListener('click', function (e) {
-        let a = e.target.closest('a');
+        let a = findTopicNavigationElement(e.target);
         if (!a) return;
 
-        let href = a.getAttribute('href');
+        let href = getElementNavigationHref(a);
         if (!href) return;
 
         if (isNestedTopicSearchLink(a)) {
@@ -1231,7 +1396,9 @@
         }
 
         // 如果点击的是帖子链接
-        if (isTopicLinkHref(href)) {
+        let topicNavigationTarget = getTopicNavigationTarget(a);
+        if (topicNavigationTarget) {
+            href = topicNavigationTarget.href;
             if (a.dataset && a.dataset[NESTED_REWRITE_PRECHECKED_KEY] === 'true') {
                 delete a.dataset[NESTED_REWRITE_PRECHECKED_KEY];
                 return;
@@ -1243,13 +1410,18 @@
             let newHref = getNestedUrl(href);
             if (newHref === href) return;
 
+            let forceHardNavigation = topicNavigationTarget.source !== 'href';
             if (getTopicIdFromUrl(href) && typeof fetch === 'function') {
                 stopTopicClickForPrecheck(e);
-                precheckAndReplayTopicLink(a, href, newHref);
+                precheckAndReplayTopicLink(a, href, newHref, { forceHardNavigation });
                 return;
             }
 
             applyNestedRewriteToLink(a, href, newHref);
+            if (forceHardNavigation) {
+                stopTopicClickForPrecheck(e);
+                hardNavigateToHref(newHref);
+            }
         }
     }, true);
 
@@ -1301,8 +1473,10 @@
             shouldKeepCanonicalTopicLink,
             shouldSkipNestedRewriteForPrivateMessage,
             shouldSkipNestedRewriteForUnsupportedTopic,
+            shouldForceScrollTopForTopicNavigation,
             shouldShowTopicSearchButton,
             restoreTopicTitleIfNeeded,
+            scrollToTopicSearchTarget,
         });
     }
 })();
