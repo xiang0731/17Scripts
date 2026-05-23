@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LINUX DO 默认树形评论区
 // @namespace    https://greasyfork.org/users/1407672
-// @version      1.6.4
+// @version      1.6.5
 // @description  在访问 LINUX DO 帖子时，默认使用树形评论区显示，并在话题页提供全回复话题内搜索
 // @author       xiang0731
 // @match        *://linux.do/*
@@ -551,6 +551,51 @@
         } catch (e) {
             return '';
         }
+    }
+
+    function getPostNumberFromTopicPath(pathname) {
+        let match = normalizeTitleText(pathname).match(/^\/t\/(?:[^/]+\/)?\d+\/(\d+)(?:\/|$)/);
+        return match ? match[1] : '';
+    }
+
+    function getPostNumberFromTopicUrl(urlValue) {
+        try {
+            return getPostNumberFromTopicPath(new URL(urlValue, window.location.origin).pathname);
+        } catch (e) {
+            return '';
+        }
+    }
+
+    function getFullTopicUrl(originalUrl) {
+        try {
+            let isPathRelative = originalUrl.startsWith('/') && !originalUrl.startsWith('//');
+            let url = new URL(originalUrl, window.location.origin);
+
+            if (/^\/t\/[^/]+\/\d+\/\d+\/?$/.test(url.pathname)) {
+                url.pathname = url.pathname.replace(/^\/t\/([^/]+)\/(\d+)\/\d+\/?$/, '/t/$1/$2');
+            } else if (/^\/t\/\d+\/\d+\/?$/.test(url.pathname)) {
+                url.pathname = url.pathname.replace(/^\/t\/(\d+)\/\d+\/?$/, '/t/$1');
+            }
+
+            return isPathRelative ? url.pathname + url.search + url.hash : url.href;
+        } catch (e) {
+            return originalUrl;
+        }
+    }
+
+    function isTopicListNavigationLink(link, href) {
+        return !!(
+            link &&
+            getPostNumberFromTopicUrl(href) &&
+            typeof link.closest === 'function' &&
+            link.closest([
+                '.topic-list',
+                '.topic-list-item',
+                '.topic-list-body',
+                '.latest-topic-list',
+                '.latest-topic-list-item',
+            ].join(', '))
+        );
     }
 
     function getUrlNestedFloorTarget() {
@@ -1406,6 +1451,8 @@
 
             if (shouldSkipNestedRewriteForUnsupportedTopic(a)) return;
             if (shouldKeepCanonicalTopicLink(e, a)) return;
+
+            if (isTopicListNavigationLink(a, href)) href = getFullTopicUrl(href);
 
             let newHref = getNestedUrl(href);
             if (newHref === href) return;
