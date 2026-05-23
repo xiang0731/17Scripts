@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LINUX DO 默认树形评论区
 // @namespace    https://greasyfork.org/users/1407672
-// @version      1.6.5
+// @version      1.6.6
 // @description  在访问 LINUX DO 帖子时，默认使用树形评论区显示，并在话题页提供全回复话题内搜索
 // @author       xiang0731
 // @match        *://linux.do/*
@@ -28,6 +28,7 @@
     const BANNER_ARCHETYPE = 'banner';
     const POST_VOTING_SUBTYPE = 'question_answer';
     const NESTED_REWRITE_PRECHECKED_KEY = 'linuxdoNestedRewritePrechecked';
+    const FLAT_VIEW_BYPASS_TTL_MS = 30 * 60 * 1000;
     let forceScrollTop = false; // 用于标记是否需要强制滚动到顶部
     let pendingTopicTitle = '';
     let pendingTopicId = '';
@@ -473,8 +474,64 @@
 
     function rememberFlatViewBypass(topicId) {
         let storage = getSessionStorage();
-        if (!storage || !topicId) return;
-        storage.setItem(ALLOW_FLAT_TOPIC_KEY, topicId);
+        let cleanTopicId = normalizeTitleText(topicId);
+        if (!storage || !cleanTopicId) return;
+        storage.setItem(ALLOW_FLAT_TOPIC_KEY, JSON.stringify({
+            expiresAt: Date.now() + FLAT_VIEW_BYPASS_TTL_MS,
+            topicId: cleanTopicId,
+        }));
+    }
+
+    function parseFlatViewBypass(rawValue) {
+        let rawText = normalizeTitleText(rawValue);
+        if (!rawText) return null;
+
+        try {
+            let value = JSON.parse(rawText);
+            if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+
+            return {
+                expiresAt: Number(value.expiresAt) || 0,
+                topicId: normalizeTitleText(value.topicId),
+            };
+        } catch (e) {
+            return {
+                expiresAt: Date.now() + FLAT_VIEW_BYPASS_TTL_MS,
+                shouldMigrate: true,
+                topicId: rawText,
+            };
+        }
+    }
+
+    function forgetFlatViewBypass() {
+        let storage = getSessionStorage();
+        if (storage) storage.removeItem(ALLOW_FLAT_TOPIC_KEY);
+    }
+
+    function shouldKeepFlatViewBypass(topicId) {
+        let storage = getSessionStorage();
+        let cleanTopicId = normalizeTitleText(topicId);
+        if (!storage || !cleanTopicId) return false;
+
+        let record = parseFlatViewBypass(storage.getItem(ALLOW_FLAT_TOPIC_KEY));
+        if (!record || !record.topicId) {
+            storage.removeItem(ALLOW_FLAT_TOPIC_KEY);
+            return false;
+        }
+
+        if (record.topicId !== cleanTopicId || (record.expiresAt && record.expiresAt < Date.now())) {
+            storage.removeItem(ALLOW_FLAT_TOPIC_KEY);
+            return false;
+        }
+
+        if (record.shouldMigrate) {
+            storage.setItem(ALLOW_FLAT_TOPIC_KEY, JSON.stringify({
+                expiresAt: record.expiresAt,
+                topicId: record.topicId,
+            }));
+        }
+
+        return true;
     }
 
     function rememberNestedFloorBypass(topicId) {
@@ -615,17 +672,6 @@
 
     function getPendingTopicSearchTarget() {
         return getStoredTopicSearchTarget() || getUrlTopicSearchTarget() || getUrlNestedFloorTarget();
-    }
-
-    function consumeFlatViewBypass(topicId) {
-        let storage = getSessionStorage();
-        if (!storage || !topicId) return false;
-
-        let storedTopicId = storage.getItem(ALLOW_FLAT_TOPIC_KEY);
-        if (!storedTopicId) return false;
-
-        storage.removeItem(ALLOW_FLAT_TOPIC_KEY);
-        return storedTopicId === topicId;
     }
 
     function consumeNestedFloorBypass(topicId) {
@@ -817,6 +863,15 @@
 
     function isTopicLinkHref(href) {
         return !!(href && isKnownTopicUrl(href));
+    }
+
+    function isNestedTopicHref(href) {
+        try {
+            let url = new URL(href, window.location.origin);
+            return url.pathname.startsWith('/n/') && !!getTopicIdFromPath(url.pathname);
+        } catch (e) {
+            return false;
+        }
     }
 
     function markTopicNavigationIntent(link, targetHref) {
@@ -1393,7 +1448,7 @@
     function redirectToNestedTopicIfAllowed() {
         let currentTopicId = getTopicIdFromPath(window.location.pathname);
         if (!currentTopicId) return;
-        if (consumeFlatViewBypass(currentTopicId) || consumeNestedFloorBypass(currentTopicId)) return;
+        if (shouldKeepFlatViewBypass(currentTopicId) || consumeNestedFloorBypass(currentTopicId)) return;
         if (isPrivateMessageTopicPage()) return;
 
         let targetUrl = getNestedUrl(window.location.href);
@@ -1421,6 +1476,8 @@
 
         let href = getElementNavigationHref(a);
         if (!href) return;
+
+        if (isNestedTopicHref(href)) forgetFlatViewBypass();
 
         if (isNestedTopicSearchLink(a)) {
             rememberNestedFloorBypass(getTopicIdFromUrl(href));

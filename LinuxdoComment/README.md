@@ -2,7 +2,7 @@
 
 Tampermonkey 用户脚本，用于在访问 LINUX DO 的 Discourse 话题页时，默认打开树形评论区，并补齐树形视图下常用的导航和搜索能力。
 
-当前版本：`1.6.5`
+当前版本：`1.6.6`
 
 ## 功能
 
@@ -41,6 +41,7 @@ node --check LinuxdoComment.js
 
 | 版本 | 改动 |
 | --- | --- |
+| `1.6.6` | 修复手动点击“以平面方式查看”后，Discourse 后续 SPA 路由更新又把同一话题切回树形视图的问题；平面视图意图改为带过期时间的短期锁，并在用户明确打开嵌套话题地址时清理。 |
 | `1.6.5` | 修复通知页点击后由 Discourse SPA 直接路由到 `/t/...` 时不会继续切换到树形视图的问题；技术上在 `history.pushState`、`history.replaceState` 和 `popstate` hook 后重新执行话题嵌套重定向。 |
 | `1.6.4` | 修复通知页、通知菜单及用户动态等数据驱动入口不会进入树形视图的问题；技术上除普通 `href` 外，额外识别 `data-url`、`data-href`、`data-topic-url`、`dataset.topicUrl`，以及通知页/用户动态中的 `data-topic-id`、`data-topic-slug`、`data-post-number` 字段，并在预检话题类型后跳转嵌套地址。 |
 | `1.6.3` | 修复在树形话题 A 中点击跳转到话题 B 时，Discourse SPA 复用旧树形视图状态导致 B 的二级嵌套回复混入 A 的回复内容；技术上对树形页跨话题跳转使用硬导航，避免复用旧树形视图状态。 |
