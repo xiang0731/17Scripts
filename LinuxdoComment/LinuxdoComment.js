@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LINUX DO 默认树形评论区
 // @namespace    https://greasyfork.org/users/1407672
-// @version      1.6.6
+// @version      1.6.7
 // @description  在访问 LINUX DO 帖子时，默认使用树形评论区显示，并在话题页提供全回复话题内搜索
 // @author       xiang0731
 // @match        *://linux.do/*
@@ -310,6 +310,20 @@
         return /^\/(?:u\/[^/]+|my)\/(?:notifications|activity)(?:\/|$)/.test(normalizeTitleText(pathname));
     }
 
+    function isTopicListContext(element) {
+        return !!(
+            element &&
+            typeof element.closest === 'function' &&
+            element.closest([
+                '.topic-list',
+                '.topic-list-item',
+                '.topic-list-body',
+                '.latest-topic-list',
+                '.latest-topic-list-item',
+            ].join(', '))
+        );
+    }
+
     function findTopicNavigationElement(target) {
         if (!target || typeof target.closest !== 'function') return null;
 
@@ -322,6 +336,9 @@
         if (isUserNotificationOrActivityPath(window.location.pathname)) {
             return target.closest('[data-topic-id], [data-linuxdo-topic-id]');
         }
+
+        let topicDataElement = target.closest('[data-topic-id], [data-linuxdo-topic-id]');
+        if (isTopicListContext(topicDataElement)) return topicDataElement;
 
         return null;
     }
@@ -644,14 +661,7 @@
         return !!(
             link &&
             getPostNumberFromTopicUrl(href) &&
-            typeof link.closest === 'function' &&
-            link.closest([
-                '.topic-list',
-                '.topic-list-item',
-                '.topic-list-body',
-                '.latest-topic-list',
-                '.latest-topic-list-item',
-            ].join(', '))
+            isTopicListContext(link)
         );
     }
 
