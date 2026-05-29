@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LINUX DO 默认树形评论区
 // @namespace    https://greasyfork.org/users/1407672
-// @version      1.6.7
+// @version      1.6.8
 // @description  在访问 LINUX DO 帖子时，默认使用树形评论区显示，并在话题页提供全回复话题内搜索
 // @author       xiang0731
 // @match        *://linux.do/*
@@ -87,12 +87,28 @@
         );
     }
 
+    function getTopicDataSlug(data) {
+        let slug = normalizeTitleText(data && data.slug);
+        if (slug) return slug;
+
+        let posts = data && data.post_stream && Array.isArray(data.post_stream.posts) ?
+            data.post_stream.posts :
+            [];
+        let firstPost = posts[0] || {};
+        return normalizeTitleText(firstPost.topic_slug || firstPost.topicSlug);
+    }
+
+    function isGenericTopicSlugTopicData(data) {
+        return getTopicDataSlug(data).toLowerCase() === 'topic';
+    }
+
     function isUnsupportedNestedTopicData(data) {
         let archetype = normalizeTitleText(data && data.archetype);
         return archetype === PRIVATE_MESSAGE_ARCHETYPE ||
             archetype === BANNER_ARCHETYPE ||
             isPostVotingTopicData(data) ||
-            isPollTopicData(data);
+            isPollTopicData(data) ||
+            isGenericTopicSlugTopicData(data);
     }
 
     function isPrivateMessageTopicPage() {
@@ -958,6 +974,9 @@
         fetchTopicDataForNestedRewrite(topicId).then((topicData) => {
             if (!topicData || isUnsupportedNestedTopicData(topicData)) {
                 if (topicData) rememberFlatViewBypass(topicId);
+                if (originalHref && link && typeof link.setAttribute === 'function') {
+                    link.setAttribute('href', originalHref);
+                }
                 if (hardNavigateAfterPrecheck && hardNavigateToHref(originalHref)) return;
                 replayTopicLinkClick(link);
                 return;
