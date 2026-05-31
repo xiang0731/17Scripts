@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LINUX DO 默认树形评论区
 // @namespace    https://greasyfork.org/users/1407672
-// @version      1.6.8
+// @version      1.7.0
 // @description  在访问 LINUX DO 帖子时，默认使用树形评论区显示，并在话题页提供全回复话题内搜索
 // @author       xiang0731
 // @match        *://linux.do/*
@@ -22,8 +22,10 @@
     const TOPIC_TITLE_BY_ID_KEY = 'linuxdo-comment-topic-title-by-id';
     const TOPIC_SEARCH_TARGET_KEY = 'linuxdo-comment-topic-search-target';
     const TOPIC_SEARCH_BUTTON_ID = 'linuxdo-topic-search-entry';
+    const TOPIC_SEARCH_MENU_ID = 'linuxdo-topic-search-menu';
     const TOPIC_SEARCH_PANEL_ID = 'linuxdo-topic-search-panel';
     const TOPIC_SEARCH_STYLE_ID = 'linuxdo-topic-search-style';
+    const FLAT_VIEW_URL_PARAM = 'linuxdo_flat';
     const PRIVATE_MESSAGE_ARCHETYPE = 'private_message';
     const BANNER_ARCHETYPE = 'banner';
     const POST_VOTING_SUBTYPE = 'question_answer';
@@ -87,28 +89,12 @@
         );
     }
 
-    function getTopicDataSlug(data) {
-        let slug = normalizeTitleText(data && data.slug);
-        if (slug) return slug;
-
-        let posts = data && data.post_stream && Array.isArray(data.post_stream.posts) ?
-            data.post_stream.posts :
-            [];
-        let firstPost = posts[0] || {};
-        return normalizeTitleText(firstPost.topic_slug || firstPost.topicSlug);
-    }
-
-    function isGenericTopicSlugTopicData(data) {
-        return getTopicDataSlug(data).toLowerCase() === 'topic';
-    }
-
     function isUnsupportedNestedTopicData(data) {
         let archetype = normalizeTitleText(data && data.archetype);
         return archetype === PRIVATE_MESSAGE_ARCHETYPE ||
             archetype === BANNER_ARCHETYPE ||
             isPostVotingTopicData(data) ||
-            isPollTopicData(data) ||
-            isGenericTopicSlugTopicData(data);
+            isPollTopicData(data);
     }
 
     function isPrivateMessageTopicPage() {
@@ -386,7 +372,11 @@
     }
 
     function shouldShowTopicSearchButton(pathname) {
-        return normalizeTitleText(pathname).startsWith('/n/') && !!getTopicIdFromPath(pathname);
+        let cleanPathname = normalizeTitleText(pathname);
+        return (
+            cleanPathname.startsWith('/n/') ||
+            cleanPathname.startsWith('/t/')
+        ) && !!getTopicIdFromPath(cleanPathname);
     }
 
     function decodeBasicHtmlEntities(text) {
@@ -673,6 +663,34 @@
         }
     }
 
+    function getFlatTopicUrl(originalUrl) {
+        try {
+            let isPathRelative = originalUrl.startsWith('/') && !originalUrl.startsWith('//');
+            let url = new URL(originalUrl, window.location.origin);
+
+            if (url.pathname.startsWith('/n/')) {
+                url.pathname = url.pathname.replace(/^\/n\//, '/t/');
+                url.searchParams.delete('sort');
+                return isPathRelative ? url.pathname + url.search + url.hash : url.href;
+            }
+        } catch (e) {
+            console.error("树形评论区脚本平面 URL 解析出错:", e);
+        }
+        return originalUrl;
+    }
+
+    function getFlatViewUrl(originalUrl) {
+        try {
+            let isPathRelative = originalUrl.startsWith('/') && !originalUrl.startsWith('//');
+            let url = new URL(originalUrl, window.location.origin);
+            url.searchParams.set(FLAT_VIEW_URL_PARAM, '1');
+            return isPathRelative ? url.pathname + url.search + url.hash : url.href;
+        } catch (e) {
+            console.error("树形评论区脚本平面标记 URL 解析出错:", e);
+            return originalUrl;
+        }
+    }
+
     function isTopicListNavigationLink(link, href) {
         return !!(
             link &&
@@ -709,6 +727,23 @@
 
         storage.removeItem(ALLOW_NESTED_FLOOR_TOPIC_KEY);
         return storedTopicId === topicId;
+    }
+
+    function consumeFlatViewUrlFlag(topicId) {
+        try {
+            let url = new URL(window.location.href);
+            if (!url.searchParams.has(FLAT_VIEW_URL_PARAM)) return false;
+
+            rememberFlatViewBypass(topicId || getTopicIdFromPath(url.pathname));
+            url.searchParams.delete(FLAT_VIEW_URL_PARAM);
+            if (window.history && typeof window.history.replaceState === 'function') {
+                window.history.replaceState(null, document.title, url.pathname + url.search + url.hash);
+            }
+            return true;
+        } catch (e) {
+            console.error('树形评论区脚本处理平面视图标记失败:', e);
+            return false;
+        }
     }
 
     function isFlatViewLink(link) {
@@ -1004,6 +1039,54 @@
                 height: 1em;
             }
 
+            .linuxdo-topic-search-button {
+                font-weight: 700;
+                line-height: 1;
+            }
+
+            .linuxdo-topic-search-menu {
+                position: absolute;
+                top: calc(100% + 0.25rem);
+                right: 0;
+                z-index: 1201;
+                min-width: 10rem;
+                margin: 0;
+                padding: 0.35rem;
+                border: 1px solid var(--primary-low, #d6d6d6);
+                border-radius: 6px;
+                background: var(--secondary, #fff);
+                box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+                list-style: none;
+            }
+
+            .linuxdo-topic-search-menu[hidden] {
+                display: none;
+            }
+
+            .linuxdo-topic-search-entry {
+                position: relative;
+            }
+
+            .linuxdo-topic-search-menu button {
+                display: block;
+                width: 100%;
+                border: 0;
+                border-radius: 4px;
+                background: transparent;
+                color: var(--primary, #222);
+                cursor: pointer;
+                font: inherit;
+                padding: 0.5rem 0.65rem;
+                text-align: left;
+                white-space: nowrap;
+            }
+
+            .linuxdo-topic-search-menu button:hover,
+            .linuxdo-topic-search-menu button:focus {
+                background: var(--primary-very-low, #f7f7f7);
+                outline: none;
+            }
+
             #${TOPIC_SEARCH_PANEL_ID} {
                 position: fixed;
                 top: 3.75rem;
@@ -1200,17 +1283,15 @@
         let button = document.createElement('button');
         button.type = 'button';
         button.className = 'btn no-text btn-icon linuxdo-topic-search-button';
-        button.title = '在本话题中搜索';
-        button.setAttribute('aria-label', '在本话题中搜索');
-        button.innerHTML = `
-            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                <path fill="currentColor" d="M9.5 3a6.5 6.5 0 0 1 5.15 10.46l4.44 4.45-1.41 1.41-4.45-4.44A6.5 6.5 0 1 1 9.5 3Zm0 2a4.5 4.5 0 1 0 0 9 4.5 4.5 0 0 0 0-9Zm8.5-2v3h3v2h-3v3h-2V8h-3V6h3V3h2Z"></path>
-            </svg>
-        `;
+        button.title = 'LINUX DO 话题工具';
+        button.setAttribute('aria-label', 'LINUX DO 话题工具');
+        button.setAttribute('aria-haspopup', 'menu');
+        button.setAttribute('aria-expanded', 'false');
+        button.textContent = 'L';
         button.addEventListener('click', (event) => {
             event.preventDefault();
             event.stopPropagation();
-            toggleTopicSearchPanel();
+            toggleTopicActionMenu();
         });
 
         entry.appendChild(button);
@@ -1222,6 +1303,7 @@
         if (!document.body || !shouldShowTopicSearchButton(window.location.pathname)) {
             if (existingEntry) existingEntry.remove();
             closeTopicSearchPanel();
+            closeTopicActionMenu();
             return;
         }
 
@@ -1233,6 +1315,88 @@
 
         let entry = createTopicSearchButton();
         headerSearchEntry.parentNode.insertBefore(entry, headerSearchEntry.nextSibling);
+    }
+
+    function getTopicActionButton() {
+        let entry = document.getElementById(TOPIC_SEARCH_BUTTON_ID);
+        return entry ? entry.querySelector('.linuxdo-topic-search-button') : null;
+    }
+
+    function setTopicActionMenuExpanded(isExpanded) {
+        let button = getTopicActionButton();
+        if (button) button.setAttribute('aria-expanded', isExpanded ? 'true' : 'false');
+    }
+
+    function ensureTopicActionMenu() {
+        let entry = document.getElementById(TOPIC_SEARCH_BUTTON_ID);
+        if (!entry) return null;
+
+        let existingMenu = document.getElementById(TOPIC_SEARCH_MENU_ID);
+        if (existingMenu) return existingMenu;
+
+        let menu = document.createElement('ul');
+        menu.id = TOPIC_SEARCH_MENU_ID;
+        menu.className = 'linuxdo-topic-search-menu';
+        menu.hidden = true;
+        menu.setAttribute('role', 'menu');
+        menu.innerHTML = `
+            <li role="none"><button type="button" role="menuitem" data-linuxdo-topic-action="search">本话题搜索</button></li>
+            <li role="none"><button type="button" role="menuitem" data-linuxdo-topic-action="flat">以平面方式查看</button></li>
+        `;
+        menu.addEventListener('click', (event) => {
+            let actionButton = event.target && event.target.closest ? event.target.closest('button[data-linuxdo-topic-action]') : null;
+            if (!actionButton) return;
+            event.preventDefault();
+            event.stopPropagation();
+
+            if (actionButton.dataset.linuxdoTopicAction === 'search') {
+                closeTopicActionMenu();
+                openTopicSearchPanel();
+            } else if (actionButton.dataset.linuxdoTopicAction === 'flat') {
+                closeTopicActionMenu();
+                openCurrentTopicFlatView();
+            }
+        });
+        entry.appendChild(menu);
+
+        document.addEventListener('click', (event) => {
+            let currentEntry = document.getElementById(TOPIC_SEARCH_BUTTON_ID);
+            if (menu.hidden || (currentEntry && currentEntry.contains(event.target))) return;
+            closeTopicActionMenu();
+        });
+
+        document.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape') closeTopicActionMenu();
+        });
+
+        return menu;
+    }
+
+    function closeTopicActionMenu() {
+        let menu = document.getElementById(TOPIC_SEARCH_MENU_ID);
+        if (menu) menu.hidden = true;
+        setTopicActionMenuExpanded(false);
+    }
+
+    function toggleTopicActionMenu() {
+        let menu = ensureTopicActionMenu();
+        if (!menu) return;
+
+        let shouldOpen = menu.hidden;
+        menu.hidden = !shouldOpen;
+        setTopicActionMenuExpanded(shouldOpen);
+        if (shouldOpen) closeTopicSearchPanel();
+    }
+
+    function openCurrentTopicFlatView() {
+        let topicId = getTopicIdFromPath(window.location.pathname);
+        if (!topicId) return false;
+
+        rememberFlatViewBypass(topicId);
+        let flatUrl = getFlatViewUrl(getFlatTopicUrl(window.location.href));
+        closeTopicSearchPanel();
+        hardNavigateToHref(flatUrl);
+        return true;
     }
 
     function scheduleTopicSearchUiRefresh() {
@@ -1374,7 +1538,7 @@
             nestedLink.title = `以嵌套评论区打开第 ${result.postNumber} 楼`;
 
             flatLink.className = 'linuxdo-topic-search-action linuxdo-topic-search-action-flat';
-            flatLink.href = result.flatUrl;
+            flatLink.href = getFlatViewUrl(result.flatUrl);
             flatLink.dataset.linuxdoTopicSearchFlat = 'true';
             flatLink.textContent = '平面查看';
             flatLink.title = `以平面图打开第 ${result.postNumber} 楼`;
@@ -1477,7 +1641,7 @@
     function redirectToNestedTopicIfAllowed() {
         let currentTopicId = getTopicIdFromPath(window.location.pathname);
         if (!currentTopicId) return;
-        if (shouldKeepFlatViewBypass(currentTopicId) || consumeNestedFloorBypass(currentTopicId)) return;
+        if (consumeFlatViewUrlFlag(currentTopicId) || shouldKeepFlatViewBypass(currentTopicId) || consumeNestedFloorBypass(currentTopicId)) return;
         if (isPrivateMessageTopicPage()) return;
 
         let targetUrl = getNestedUrl(window.location.href);
@@ -1600,8 +1764,11 @@
             isNestedTopicSearchLink,
             isUnsupportedNestedTopicData,
             getDocumentTitle: () => document.title,
+            getFlatTopicUrl,
+            getFlatViewUrl,
             rememberTopicTitle,
             normalizeTopicSearchResults,
+            openCurrentTopicFlatView,
             shouldBypassNestedRewrite,
             shouldKeepCanonicalTopicLink,
             shouldSkipNestedRewriteForPrivateMessage,
