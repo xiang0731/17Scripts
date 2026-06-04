@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LINUX DO 默认树形评论区
 // @namespace    https://greasyfork.org/users/1407672
-// @version      1.7.1
+// @version      1.7.2
 // @description  在访问 LINUX DO 帖子时，默认使用树形评论区显示，并在话题页提供全回复话题内搜索
 // @author       xiang0731
 // @match        *://linux.do/*
@@ -31,6 +31,7 @@
     const POST_VOTING_SUBTYPE = 'question_answer';
     const NESTED_REWRITE_PRECHECKED_KEY = 'linuxdoNestedRewritePrechecked';
     const FLAT_VIEW_BYPASS_TTL_MS = 30 * 60 * 1000;
+    const DEFAULT_TOPIC_SLUG = 'topic';
     let forceScrollTop = false; // 用于标记是否需要强制滚动到顶部
     let pendingTopicTitle = '';
     let pendingTopicId = '';
@@ -204,14 +205,38 @@
         return !currentTitle || currentTitle === SITE_TITLE || !currentTitle.includes(topicTitle);
     }
 
+    function parseTopicPath(pathname) {
+        let segments = normalizeTitleText(pathname).split('/').filter(Boolean);
+        let route = segments[0];
+        if (route !== 't' && route !== 'n') return { route: '', topicSlug: '', topicId: '', postNumber: '' };
+
+        if (/^\d+$/.test(segments[1] || '')) {
+            return {
+                route,
+                topicSlug: '',
+                topicId: segments[1],
+                postNumber: /^\d+$/.test(segments[2] || '') ? segments[2] : '',
+            };
+        }
+
+        if (/^\d+$/.test(segments[2] || '')) {
+            return {
+                route,
+                topicSlug: segments[1],
+                topicId: segments[2],
+                postNumber: /^\d+$/.test(segments[3] || '') ? segments[3] : '',
+            };
+        }
+
+        return { route, topicSlug: '', topicId: '', postNumber: '' };
+    }
+
     function getTopicIdFromPath(pathname) {
-        let match = normalizeTitleText(pathname).match(/^\/[tn]\/(?:[^/]+\/)?(\d+)(?:\/|$)/);
-        return match ? match[1] : '';
+        return parseTopicPath(pathname).topicId;
     }
 
     function getTopicSlugFromPath(pathname) {
-        let match = normalizeTitleText(pathname).match(/^\/[tn]\/([^/]+)\/\d+(?:\/|$)/);
-        return match && !/^\d+$/.test(match[1]) ? match[1] : '';
+        return parseTopicPath(pathname).topicSlug;
     }
 
     function getTopicIdFromUrl(urlValue) {
@@ -256,6 +281,17 @@
         return '';
     }
 
+    function buildTopicPath(route, topicId, topicSlug, postNumber) {
+        let cleanTopicId = normalizeTitleText(topicId);
+        if (!cleanTopicId) return '';
+
+        let cleanRoute = route === 'n' ? 'n' : 't';
+        let cleanSlug = normalizeTitleText(topicSlug) || DEFAULT_TOPIC_SLUG;
+        let cleanPostNumber = normalizeTitleText(postNumber);
+        let basePath = `/${cleanRoute}/${cleanSlug}/${cleanTopicId}`;
+        return cleanPostNumber ? `${basePath}/${cleanPostNumber}` : basePath;
+    }
+
     function buildTopicHrefFromElementData(element) {
         let topicId = getElementDataValue(element, ['topicId', 'topic_id', 'linuxdoTopicId'], [
             'data-topic-id',
@@ -274,8 +310,7 @@
             'data-post_number',
             'data-linuxdo-post-number',
         ]);
-        let basePath = topicSlug ? `/t/${topicSlug}/${topicId}` : `/t/${topicId}`;
-        return postNumber ? `${basePath}/${postNumber}` : basePath;
+        return buildTopicPath('t', topicId, topicSlug, postNumber);
     }
 
     function getElementNavigationHrefCandidates(element) {
@@ -413,16 +448,14 @@
         let topicId = result && (result.topicId || result.topic_id);
         let postNumber = result && (result.postNumber || result.post_number);
         let slug = normalizeTitleText(topicSlug || (result && (result.topicSlug || result.topic_slug)));
-        if (topicId && postNumber && slug) return `/t/${slug}/${topicId}/${postNumber}`;
-        return topicId && postNumber ? `/t/${topicId}/${postNumber}` : '';
+        return topicId && postNumber ? buildTopicPath('t', topicId, slug, postNumber) : '';
     }
 
     function getTopicSearchNestedUrl(result, topicSlug) {
         let topicId = result && (result.topicId || result.topic_id);
         let postNumber = result && (result.postNumber || result.post_number);
         let slug = normalizeTitleText(topicSlug || (result && (result.topicSlug || result.topic_slug)));
-        if (topicId && postNumber && slug) return `/n/${slug}/${topicId}/${postNumber}`;
-        return topicId && postNumber ? `/n/${topicId}/${postNumber}` : '';
+        return topicId && postNumber ? buildTopicPath('n', topicId, slug, postNumber) : '';
     }
 
     function getTopicSearchTargetSelectors(target) {
@@ -621,8 +654,8 @@
     }
 
     function getPostNumberFromNestedPath(pathname) {
-        let match = normalizeTitleText(pathname).match(/^\/n\/(?:[^/]+\/)?\d+\/(\d+)(?:\/|$)/);
-        return match ? match[1] : '';
+        let topicPath = parseTopicPath(pathname);
+        return topicPath.route === 'n' ? topicPath.postNumber : '';
     }
 
     function getPostNumberFromNestedUrl(urlValue) {
@@ -634,8 +667,8 @@
     }
 
     function getPostNumberFromTopicPath(pathname) {
-        let match = normalizeTitleText(pathname).match(/^\/t\/(?:[^/]+\/)?\d+\/(\d+)(?:\/|$)/);
-        return match ? match[1] : '';
+        let topicPath = parseTopicPath(pathname);
+        return topicPath.route === 't' ? topicPath.postNumber : '';
     }
 
     function getPostNumberFromTopicUrl(urlValue) {
@@ -650,11 +683,10 @@
         try {
             let isPathRelative = originalUrl.startsWith('/') && !originalUrl.startsWith('//');
             let url = new URL(originalUrl, window.location.origin);
+            let topicPath = parseTopicPath(url.pathname);
 
-            if (/^\/t\/[^/]+\/\d+\/\d+\/?$/.test(url.pathname)) {
-                url.pathname = url.pathname.replace(/^\/t\/([^/]+)\/(\d+)\/\d+\/?$/, '/t/$1/$2');
-            } else if (/^\/t\/\d+\/\d+\/?$/.test(url.pathname)) {
-                url.pathname = url.pathname.replace(/^\/t\/(\d+)\/\d+\/?$/, '/t/$1');
+            if (topicPath.route === 't' && topicPath.topicId) {
+                url.pathname = buildTopicPath('t', topicPath.topicId, topicPath.topicSlug);
             }
 
             return isPathRelative ? url.pathname + url.search + url.hash : url.href;
@@ -669,7 +701,10 @@
             let url = new URL(originalUrl, window.location.origin);
 
             if (url.pathname.startsWith('/n/')) {
-                url.pathname = url.pathname.replace(/^\/n\//, '/t/');
+                let topicPath = parseTopicPath(url.pathname);
+                url.pathname = topicPath.topicId ?
+                    buildTopicPath('t', topicPath.topicId, topicPath.topicSlug, topicPath.postNumber) :
+                    url.pathname.replace(/^\/n\//, '/t/');
                 url.searchParams.delete('sort');
                 return isPathRelative ? url.pathname + url.search + url.hash : url.href;
             }
@@ -907,26 +942,11 @@
             let url = new URL(originalUrl, window.location.origin);
 
             if (url.pathname.startsWith('/t/')) {
-                let newPath = url.pathname;
-
-                // 1. 匹配带 slug 的标准链接: /t/话题名/帖子ID/楼层号
-                if (/^\/t\/[^/]+\/\d+(?:\/\d+)?\/?$/.test(newPath)) {
-                    newPath = newPath.replace(/^\/t\/([^/]+)\/(\d+)(?:\/(\d+))?\/?$/, (match, slug, topicId, postNumber) => {
-                        if (postNumber === '1') return `/n/${slug}/${topicId}`;
-                        return postNumber ? `/n/${slug}/${topicId}/${postNumber}` : `/n/${slug}/${topicId}`;
-                    });
-                }
-                // 2. 匹配无 slug 的短链接: /t/帖子ID/楼层号
-                else if (/^\/t\/\d+(?:\/\d+)?\/?$/.test(newPath)) {
-                    newPath = newPath.replace(/^\/t\/(\d+)(?:\/(\d+))?\/?$/, (match, topicId, postNumber) => {
-                        if (postNumber === '1') return `/n/${topicId}`;
-                        return postNumber ? `/n/${topicId}/${postNumber}` : `/n/${topicId}`;
-                    });
-                } else {
-                    newPath = newPath.replace(/^\/t\//, '/n/');
-                }
-
-                url.pathname = newPath;
+                let topicPath = parseTopicPath(url.pathname);
+                let postNumber = topicPath.postNumber === '1' ? '' : topicPath.postNumber;
+                url.pathname = topicPath.topicId ?
+                    buildTopicPath('n', topicPath.topicId, topicPath.topicSlug, postNumber) :
+                    url.pathname.replace(/^\/t\//, '/n/');
                 if (!url.searchParams.has('sort')) url.searchParams.set('sort', 'old');
                 return isPathRelative ? url.pathname + url.search + url.hash : url.href;
             }
