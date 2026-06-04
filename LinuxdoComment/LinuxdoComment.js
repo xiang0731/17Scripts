@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LINUX DO 默认树形评论区
 // @namespace    https://greasyfork.org/users/1407672
-// @version      1.7.0
+// @version      1.7.1
 // @description  在访问 LINUX DO 帖子时，默认使用树形评论区显示，并在话题页提供全回复话题内搜索
 // @author       xiang0731
 // @match        *://linux.do/*
@@ -691,6 +691,18 @@
         }
     }
 
+    function getNestedViewUrl(originalUrl) {
+        try {
+            let isPathRelative = originalUrl.startsWith('/') && !originalUrl.startsWith('//');
+            let nestedUrl = new URL(getNestedUrl(originalUrl), window.location.origin);
+            nestedUrl.searchParams.delete(FLAT_VIEW_URL_PARAM);
+            return isPathRelative ? nestedUrl.pathname + nestedUrl.search + nestedUrl.hash : nestedUrl.href;
+        } catch (e) {
+            console.error("树形评论区脚本嵌套 URL 解析出错:", e);
+            return originalUrl;
+        }
+    }
+
     function isTopicListNavigationLink(link, href) {
         return !!(
             link &&
@@ -900,12 +912,14 @@
                 // 1. 匹配带 slug 的标准链接: /t/话题名/帖子ID/楼层号
                 if (/^\/t\/[^/]+\/\d+(?:\/\d+)?\/?$/.test(newPath)) {
                     newPath = newPath.replace(/^\/t\/([^/]+)\/(\d+)(?:\/(\d+))?\/?$/, (match, slug, topicId, postNumber) => {
+                        if (postNumber === '1') return `/n/${slug}/${topicId}`;
                         return postNumber ? `/n/${slug}/${topicId}/${postNumber}` : `/n/${slug}/${topicId}`;
                     });
                 }
                 // 2. 匹配无 slug 的短链接: /t/帖子ID/楼层号
                 else if (/^\/t\/\d+(?:\/\d+)?\/?$/.test(newPath)) {
                     newPath = newPath.replace(/^\/t\/(\d+)(?:\/(\d+))?\/?$/, (match, topicId, postNumber) => {
+                        if (postNumber === '1') return `/n/${topicId}`;
                         return postNumber ? `/n/${topicId}/${postNumber}` : `/n/${topicId}`;
                     });
                 } else {
@@ -1342,6 +1356,7 @@
         menu.innerHTML = `
             <li role="none"><button type="button" role="menuitem" data-linuxdo-topic-action="search">本话题搜索</button></li>
             <li role="none"><button type="button" role="menuitem" data-linuxdo-topic-action="flat">以平面方式查看</button></li>
+            <li role="none"><button type="button" role="menuitem" data-linuxdo-topic-action="nested">以嵌套方式查看</button></li>
         `;
         menu.addEventListener('click', (event) => {
             let actionButton = event.target && event.target.closest ? event.target.closest('button[data-linuxdo-topic-action]') : null;
@@ -1355,6 +1370,9 @@
             } else if (actionButton.dataset.linuxdoTopicAction === 'flat') {
                 closeTopicActionMenu();
                 openCurrentTopicFlatView();
+            } else if (actionButton.dataset.linuxdoTopicAction === 'nested') {
+                closeTopicActionMenu();
+                openCurrentTopicNestedView();
             }
         });
         entry.appendChild(menu);
@@ -1396,6 +1414,17 @@
         let flatUrl = getFlatViewUrl(getFlatTopicUrl(window.location.href));
         closeTopicSearchPanel();
         hardNavigateToHref(flatUrl);
+        return true;
+    }
+
+    function openCurrentTopicNestedView() {
+        let topicId = getTopicIdFromPath(window.location.pathname);
+        if (!topicId) return false;
+
+        forgetFlatViewBypass();
+        let nestedUrl = getNestedViewUrl(window.location.href);
+        closeTopicSearchPanel();
+        hardNavigateToHref(nestedUrl);
         return true;
     }
 
@@ -1766,9 +1795,11 @@
             getDocumentTitle: () => document.title,
             getFlatTopicUrl,
             getFlatViewUrl,
+            getNestedViewUrl,
             rememberTopicTitle,
             normalizeTopicSearchResults,
             openCurrentTopicFlatView,
+            openCurrentTopicNestedView,
             shouldBypassNestedRewrite,
             shouldKeepCanonicalTopicLink,
             shouldSkipNestedRewriteForPrivateMessage,
