@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LINUX DO 默认树形评论区
 // @namespace    https://greasyfork.org/users/1407672
-// @version      1.7.4
+// @version      1.7.5
 // @description  在访问 LINUX DO 帖子时，默认使用树形评论区显示，并在话题页提供全回复话题内搜索
 // @author       xiang0731
 // @match        *://linux.do/*
@@ -70,17 +70,42 @@
         return !!(value && typeof value === 'object' && Object.keys(value).length > 0);
     }
 
+    function containsDiscoursePollMarkup(text) {
+        let cleanText = String(text || '').toLowerCase();
+        return cleanText.includes('[poll') ||
+            cleanText.includes('[/poll]') ||
+            cleanText.includes('data-poll-name') ||
+            cleanText.includes('poll-container') ||
+            cleanText.includes('poll-info') ||
+            cleanText.includes('poll-buttons') ||
+            cleanText.includes('poll-results') ||
+            /class=["'][^"']*\bpoll\b/.test(cleanText);
+    }
+
+    function topicDataObjectContainsPollData(value) {
+        if (!value || typeof value !== 'object') return false;
+        return hasTruthyTopicDataValue(value.polls) ||
+            hasTruthyTopicDataValue(value.polls_votes) ||
+            hasTruthyTopicDataValue(value.has_poll) ||
+            hasTruthyTopicDataValue(value.has_polls) ||
+            hasTruthyTopicDataValue(value.poll_enabled);
+    }
+
     function postContainsPollData(post) {
         if (!post || typeof post !== 'object') return false;
-        if (hasTruthyTopicDataValue(post.polls) || hasTruthyTopicDataValue(post.polls_votes)) return true;
+        if (topicDataObjectContainsPollData(post)) return true;
+        if (containsDiscoursePollMarkup(post.cooked) || containsDiscoursePollMarkup(post.raw)) return true;
 
         let customFields = post.custom_fields || {};
-        return hasTruthyTopicDataValue(customFields.polls) ||
-            hasTruthyTopicDataValue(customFields.has_polls) ||
-            hasTruthyTopicDataValue(customFields.poll_enabled);
+        return topicDataObjectContainsPollData(customFields);
     }
 
     function isPollTopicData(data) {
+        if (topicDataObjectContainsPollData(data)) return true;
+
+        let customFields = data && data.custom_fields || {};
+        if (topicDataObjectContainsPollData(customFields)) return true;
+
         let posts = data && data.post_stream && Array.isArray(data.post_stream.posts) ?
             data.post_stream.posts :
             [];
@@ -1836,7 +1861,7 @@
         let currentTopicId = getTopicIdFromPath(window.location.pathname);
         if (!currentTopicId) return;
         if (consumeFlatViewUrlFlag(currentTopicId) || shouldKeepFlatViewBypass(currentTopicId) || consumeNestedFloorBypass(currentTopicId)) return;
-        if (isPrivateMessageTopicPage()) return;
+        if (isUnsupportedNestedTopicPage()) return;
 
         let targetUrl = getNestedUrl(window.location.href);
         if (targetUrl === window.location.href) return;
@@ -1844,6 +1869,10 @@
 
         fetchTopicDataForNestedRewrite(currentTopicId).then((topicData) => {
             if (!isRouteSnapshotCurrent(snapshot)) {
+                clearPendingNestedRedirect(snapshot);
+                return;
+            }
+            if (isUnsupportedNestedTopicPage()) {
                 clearPendingNestedRedirect(snapshot);
                 return;
             }
