@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LINUX DO 默认树形评论区
 // @namespace    https://greasyfork.org/users/1407672
-// @version      1.7.2
+// @version      1.7.4
 // @description  在访问 LINUX DO 帖子时，默认使用树形评论区显示，并在话题页提供全回复话题内搜索
 // @author       xiang0731
 // @match        *://linux.do/*
@@ -25,6 +25,8 @@
     const TOPIC_SEARCH_MENU_ID = 'linuxdo-topic-search-menu';
     const TOPIC_SEARCH_PANEL_ID = 'linuxdo-topic-search-panel';
     const TOPIC_SEARCH_STYLE_ID = 'linuxdo-topic-search-style';
+    const PENDING_NESTED_REDIRECT_STYLE_ID = 'linuxdo-comment-pending-nested-redirect-style';
+    const PENDING_NESTED_REDIRECT_CLASS = 'linuxdo-comment-pending-nested-redirect';
     const FLAT_VIEW_URL_PARAM = 'linuxdo_flat';
     const PRIVATE_MESSAGE_ARCHETYPE = 'private_message';
     const BANNER_ARCHETYPE = 'banner';
@@ -40,9 +42,14 @@
     let topicTitleRequestId = '';
     let topicSearchAbortController = null;
     let topicSearchRefreshTimer = null;
+    let topicSearchRequestId = 0;
     let topicSearchObserver = null;
+    let topicSearchTargetScrollCheckTimer = null;
     let topicSearchNavigationHooksInstalled = false;
+    let topicActionMenuDocumentListenersInstalled = false;
     let handledTopicSearchTargetKey = '';
+    let routeVersion = 0;
+    let pendingNestedRedirectKey = '';
 
     function normalizeTitleText(text) {
         return String(text || '').replace(/\s+/g, ' ').trim();
@@ -831,6 +838,13 @@
             .catch((e) => {
                 console.error('树形评论区脚本获取话题标题失败:', e);
                 return '';
+            })
+            .then((topicTitle) => {
+                if (topicTitleRequestId === topicId) {
+                    topicTitleRequest = null;
+                    topicTitleRequestId = '';
+                }
+                return topicTitle;
             });
 
         return topicTitleRequest;
@@ -935,6 +949,14 @@
         });
     }
 
+    function scheduleTopicSearchTargetScrollCheck() {
+        if (topicSearchTargetScrollCheckTimer) return;
+        topicSearchTargetScrollCheckTimer = setTimeout(() => {
+            topicSearchTargetScrollCheckTimer = null;
+            scrollToTopicSearchTarget();
+        }, 120);
+    }
+
     // 核心转换逻辑：处理链接替换，并保留楼层号用于定位。
     function getNestedUrl(originalUrl) {
         try {
@@ -1031,6 +1053,7 @@
 
     function precheckAndReplayTopicLink(link, originalHref, nestedHref, options) {
         options = options || {};
+        let navigationSnapshot = options.navigationSnapshot || getRouteSnapshot();
         let topicId = getTopicIdFromUrl(originalHref);
         if (!topicId) {
             applyNestedRewriteToLink(link, originalHref, nestedHref);
@@ -1041,6 +1064,8 @@
 
         let hardNavigateAfterPrecheck = options.forceHardNavigation || shouldHardNavigateCrossTopicFromNested(topicId);
         fetchTopicDataForNestedRewrite(topicId).then((topicData) => {
+            if (!isPrecheckedNavigationStillCurrent(navigationSnapshot, link)) return;
+
             if (!topicData || isUnsupportedNestedTopicData(topicData)) {
                 if (topicData) rememberFlatViewBypass(topicId);
                 if (originalHref && link && typeof link.setAttribute === 'function') {
@@ -1361,6 +1386,24 @@
         if (button) button.setAttribute('aria-expanded', isExpanded ? 'true' : 'false');
     }
 
+    function installTopicActionMenuDocumentListeners() {
+        if (topicActionMenuDocumentListenersInstalled) return;
+        topicActionMenuDocumentListenersInstalled = true;
+
+        document.addEventListener('click', (event) => {
+            let menu = document.getElementById(TOPIC_SEARCH_MENU_ID);
+            if (!menu || menu.hidden) return;
+
+            let currentEntry = document.getElementById(TOPIC_SEARCH_BUTTON_ID);
+            if (currentEntry && currentEntry.contains(event.target)) return;
+            closeTopicActionMenu();
+        });
+
+        document.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape') closeTopicActionMenu();
+        });
+    }
+
     function ensureTopicActionMenu() {
         let entry = document.getElementById(TOPIC_SEARCH_BUTTON_ID);
         if (!entry) return null;
@@ -1396,16 +1439,7 @@
             }
         });
         entry.appendChild(menu);
-
-        document.addEventListener('click', (event) => {
-            let currentEntry = document.getElementById(TOPIC_SEARCH_BUTTON_ID);
-            if (menu.hidden || (currentEntry && currentEntry.contains(event.target))) return;
-            closeTopicActionMenu();
-        });
-
-        document.addEventListener('keydown', (event) => {
-            if (event.key === 'Escape') closeTopicActionMenu();
-        });
+        installTopicActionMenuDocumentListeners();
 
         return menu;
     }
@@ -1504,6 +1538,7 @@
         let panel = ensureTopicSearchPanel();
         panel.dataset.topicId = topicId;
         panel.hidden = false;
+        clearTopicSearchResults();
         setTopicSearchStatus('输入关键词后回车，搜索未加载的回复。');
 
         let input = panel.querySelector('.linuxdo-topic-search-input');
@@ -1516,6 +1551,7 @@
     function closeTopicSearchPanel() {
         let panel = document.getElementById(TOPIC_SEARCH_PANEL_ID);
         if (panel) panel.hidden = true;
+        topicSearchRequestId += 1;
         if (topicSearchAbortController) {
             topicSearchAbortController.abort();
             topicSearchAbortController = null;
@@ -1604,6 +1640,18 @@
         });
     }
 
+    function isCurrentTopicSearchRequest(requestId, topicId) {
+        let panel = document.getElementById(TOPIC_SEARCH_PANEL_ID);
+        return !!(
+            requestId === topicSearchRequestId &&
+            panel &&
+            !panel.hidden &&
+            panel.dataset &&
+            panel.dataset.topicId === topicId &&
+            getCurrentTopicSearchId() === topicId
+        );
+    }
+
     function performTopicSearch(keyword) {
         let topicId = getCurrentTopicSearchId();
         let endpoint = buildTopicSearchEndpoint(topicId, keyword);
@@ -1615,6 +1663,8 @@
 
         if (topicSearchAbortController) topicSearchAbortController.abort();
         topicSearchAbortController = typeof AbortController === 'function' ? new AbortController() : null;
+        topicSearchRequestId += 1;
+        let requestId = topicSearchRequestId;
 
         clearTopicSearchResults();
         setTopicSearchStatus('正在搜索本话题...');
@@ -1634,12 +1684,14 @@
                 let error = data && data.grouped_search_result && data.grouped_search_result.error;
                 if (error) throw new Error(error);
 
+                if (!isCurrentTopicSearchRequest(requestId, topicId)) return;
                 let results = normalizeTopicSearchResults(data);
                 renderTopicSearchResults(results);
                 setTopicSearchStatus(results.length ? `找到 ${results.length} 条结果。嵌套查看直接打开树形楼层，平面查看打开平面楼层。` : '没有找到匹配结果。');
             })
             .catch((error) => {
                 if (error && error.name === 'AbortError') return;
+                if (!isCurrentTopicSearchRequest(requestId, topicId)) return;
                 clearTopicSearchResults();
                 setTopicSearchStatus(error && error.message ? error.message : '搜索失败，请稍后再试。');
                 console.error('树形评论区脚本话题内搜索失败:', error);
@@ -1655,18 +1707,18 @@
             if (typeof originalMethod !== 'function') return;
 
             window.history[methodName] = function () {
+                let previousHref = window.location.href;
                 let result = originalMethod.apply(this, arguments);
-                scheduleTopicSearchUiRefresh();
-                scheduleTopicSearchTargetScroll();
-                redirectToNestedTopicIfAllowed();
+                handleHistoryRouteChange(previousHref);
                 return result;
             };
         });
 
         window.addEventListener('popstate', () => {
+            noteRouteChanged();
             scheduleTopicSearchUiRefresh();
             scheduleTopicSearchTargetScroll();
-            redirectToNestedTopicIfAllowed();
+            redirectToNestedTopicIfAllowed(getRouteSnapshot());
         });
     }
 
@@ -1674,7 +1726,7 @@
         if (topicSearchObserver || !document.body) return;
         topicSearchObserver = new MutationObserver(() => {
             scheduleTopicSearchUiRefresh();
-            scrollToTopicSearchTarget();
+            scheduleTopicSearchTargetScrollCheck();
         });
         topicSearchObserver.observe(document.body, { childList: true, subtree: true });
     }
@@ -1687,7 +1739,100 @@
         }
     }
 
-    function redirectToNestedTopicIfAllowed() {
+    function getRouteSnapshot() {
+        return {
+            href: window.location.href,
+            version: routeVersion,
+        };
+    }
+
+    function getRouteSnapshotKey(snapshot) {
+        if (!snapshot) return '';
+        return `${snapshot.version}:${snapshot.href}`;
+    }
+
+    function isRouteSnapshotCurrent(snapshot) {
+        return !!(
+            snapshot &&
+            snapshot.version === routeVersion &&
+            snapshot.href === window.location.href
+        );
+    }
+
+    function getPendingNestedRedirectClassTarget() {
+        return document.documentElement || document.body;
+    }
+
+    function ensurePendingNestedRedirectStyle() {
+        if (document.getElementById(PENDING_NESTED_REDIRECT_STYLE_ID)) return;
+        if (typeof document.createElement !== 'function') return;
+
+        let styleParent = document.head || document.documentElement;
+        if (!styleParent || typeof styleParent.appendChild !== 'function') return;
+
+        let style = document.createElement('style');
+        style.id = PENDING_NESTED_REDIRECT_STYLE_ID;
+        style.textContent = `
+            html.${PENDING_NESTED_REDIRECT_CLASS} #main-outlet .topic-area,
+            html.${PENDING_NESTED_REDIRECT_CLASS} #main-outlet .topic-title,
+            html.${PENDING_NESTED_REDIRECT_CLASS} #main-outlet #topic-title,
+            html.${PENDING_NESTED_REDIRECT_CLASS} #main-outlet .posts-wrapper,
+            html.${PENDING_NESTED_REDIRECT_CLASS} #main-outlet .post-stream,
+            html.${PENDING_NESTED_REDIRECT_CLASS} #main-outlet .topic-navigation,
+            html.${PENDING_NESTED_REDIRECT_CLASS} #main-outlet .timeline-container,
+            body.${PENDING_NESTED_REDIRECT_CLASS} #main-outlet .topic-area,
+            body.${PENDING_NESTED_REDIRECT_CLASS} #main-outlet .topic-title,
+            body.${PENDING_NESTED_REDIRECT_CLASS} #main-outlet #topic-title,
+            body.${PENDING_NESTED_REDIRECT_CLASS} #main-outlet .posts-wrapper,
+            body.${PENDING_NESTED_REDIRECT_CLASS} #main-outlet .post-stream,
+            body.${PENDING_NESTED_REDIRECT_CLASS} #main-outlet .topic-navigation,
+            body.${PENDING_NESTED_REDIRECT_CLASS} #main-outlet .timeline-container {
+                visibility: hidden !important;
+            }
+        `;
+        styleParent.appendChild(style);
+    }
+
+    function suppressFlatTopicDuringNestedRedirect(snapshot) {
+        let target = getPendingNestedRedirectClassTarget();
+        if (!target || !target.classList) return;
+
+        ensurePendingNestedRedirectStyle();
+        pendingNestedRedirectKey = getRouteSnapshotKey(snapshot);
+        target.classList.add(PENDING_NESTED_REDIRECT_CLASS);
+    }
+
+    function clearPendingNestedRedirect(snapshot) {
+        if (snapshot && pendingNestedRedirectKey && pendingNestedRedirectKey !== getRouteSnapshotKey(snapshot)) return;
+
+        let target = getPendingNestedRedirectClassTarget();
+        if (target && target.classList) target.classList.remove(PENDING_NESTED_REDIRECT_CLASS);
+        pendingNestedRedirectKey = '';
+    }
+
+    function noteRouteChanged() {
+        routeVersion += 1;
+        clearPendingNestedRedirect();
+        closeTopicActionMenu();
+        closeTopicSearchPanel();
+        handledTopicSearchTargetKey = '';
+    }
+
+    function handleHistoryRouteChange(previousHref) {
+        if (previousHref !== window.location.href) noteRouteChanged();
+        scheduleTopicSearchUiRefresh();
+        scheduleTopicSearchTargetScroll();
+        redirectToNestedTopicIfAllowed(getRouteSnapshot());
+    }
+
+    function isPrecheckedNavigationStillCurrent(snapshot, link) {
+        if (!isRouteSnapshotCurrent(snapshot)) return false;
+        if (!link) return false;
+        return link.isConnected !== false;
+    }
+
+    function redirectToNestedTopicIfAllowed(snapshot) {
+        snapshot = snapshot || getRouteSnapshot();
         let currentTopicId = getTopicIdFromPath(window.location.pathname);
         if (!currentTopicId) return;
         if (consumeFlatViewUrlFlag(currentTopicId) || shouldKeepFlatViewBypass(currentTopicId) || consumeNestedFloorBypass(currentTopicId)) return;
@@ -1695,13 +1840,28 @@
 
         let targetUrl = getNestedUrl(window.location.href);
         if (targetUrl === window.location.href) return;
+        suppressFlatTopicDuringNestedRedirect(snapshot);
 
         fetchTopicDataForNestedRewrite(currentTopicId).then((topicData) => {
-            if (!topicData || isUnsupportedNestedTopicData(topicData)) return;
-            if (!window.location.pathname.startsWith('/t/')) return;
-            if (getTopicIdFromPath(window.location.pathname) !== currentTopicId) return;
+            if (!isRouteSnapshotCurrent(snapshot)) {
+                clearPendingNestedRedirect(snapshot);
+                return;
+            }
+            if (!topicData || isUnsupportedNestedTopicData(topicData)) {
+                clearPendingNestedRedirect(snapshot);
+                return;
+            }
+            if (!window.location.pathname.startsWith('/t/')) {
+                clearPendingNestedRedirect(snapshot);
+                return;
+            }
+            if (getTopicIdFromPath(window.location.pathname) !== currentTopicId) {
+                clearPendingNestedRedirect(snapshot);
+                return;
+            }
 
             let freshTargetUrl = getNestedUrl(window.location.href);
+            if (freshTargetUrl === window.location.href) clearPendingNestedRedirect(snapshot);
             if (freshTargetUrl !== window.location.href) window.location.replace(freshTargetUrl);
         });
     }
@@ -1757,9 +1917,10 @@
             if (newHref === href) return;
 
             let forceHardNavigation = topicNavigationTarget.source !== 'href';
+            let navigationSnapshot = getRouteSnapshot();
             if (getTopicIdFromUrl(href) && typeof fetch === 'function') {
                 stopTopicClickForPrecheck(e);
-                precheckAndReplayTopicLink(a, href, newHref, { forceHardNavigation });
+                precheckAndReplayTopicLink(a, href, newHref, { forceHardNavigation, navigationSnapshot });
                 return;
             }
 
