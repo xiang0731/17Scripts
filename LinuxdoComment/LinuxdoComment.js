@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LINUX DO 默认树形评论区
 // @namespace    https://greasyfork.org/users/1407672
-// @version      1.7.5
+// @version      1.7.6
 // @description  在访问 LINUX DO 帖子时，默认使用树形评论区显示，并在话题页提供全回复话题内搜索
 // @author       xiang0731
 // @match        *://linux.do/*
@@ -768,6 +768,36 @@
             console.error("树形评论区脚本嵌套 URL 解析出错:", e);
             return originalUrl;
         }
+    }
+
+    function getFullNestedTopicUrl(originalUrl) {
+        try {
+            let isPathRelative = originalUrl.startsWith('/') && !originalUrl.startsWith('//');
+            let url = new URL(originalUrl, window.location.origin);
+            let topicPath = parseTopicPath(url.pathname);
+
+            if (topicPath.route === 'n' && topicPath.topicId && topicPath.postNumber === '1') {
+                url.pathname = buildTopicPath('n', topicPath.topicId, topicPath.topicSlug);
+                return isPathRelative ? url.pathname + url.search + url.hash : url.href;
+            }
+        } catch (e) {
+            console.error("树形评论区脚本完整嵌套 URL 解析出错:", e);
+        }
+        return originalUrl;
+    }
+
+    function normalizeNestedFirstPostRoute() {
+        let normalizedUrl = getFullNestedTopicUrl(window.location.href);
+        if (normalizedUrl === window.location.href) return false;
+
+        if (window.location && typeof window.location.replace === 'function') {
+            window.location.replace(normalizedUrl);
+        } else if (window.history && typeof window.history.replaceState === 'function') {
+            window.history.replaceState(null, document.title, normalizedUrl);
+        } else {
+            window.location.href = normalizedUrl;
+        }
+        return true;
     }
 
     function isTopicListNavigationLink(link, href) {
@@ -1845,6 +1875,7 @@
 
     function handleHistoryRouteChange(previousHref) {
         if (previousHref !== window.location.href) noteRouteChanged();
+        if (normalizeNestedFirstPostRoute()) return;
         scheduleTopicSearchUiRefresh();
         scheduleTopicSearchTargetScroll();
         redirectToNestedTopicIfAllowed(getRouteSnapshot());
@@ -1896,6 +1927,8 @@
     }
 
     // 1. 处理页面初次加载或外部直接跳转
+    normalizeNestedFirstPostRoute();
+
     if (window.location.pathname.startsWith('/t/')) {
         redirectToNestedTopicIfAllowed();
     }
