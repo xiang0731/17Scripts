@@ -2,10 +2,10 @@
 
 ## 脚本列表
 
-GPTDown - 用于复制或者保存网页中的GPT对话
-WebsiteInfo - 显示网站基本信息，并提供复制功能
-LinuxdoComment - 用于Linuxdo论坛默认以嵌套模式查看帖子
-Bookmarker - 快速保存书签到本地文件中
+- GPTDown: 用于复制或者保存网页中的GPT对话
+- WebsiteInfo: 显示网站基本信息，并提供复制功能
+- LinuxdoComment: 用于Linuxdo论坛默认以嵌套模式查看帖子
+- Bookmarker: 快速保存书签到本地文件中
 
 ## 使用方式
 
