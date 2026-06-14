@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LINUX DO 默认树形评论区
 // @namespace    https://greasyfork.org/users/1407672
-// @version      1.7.6
+// @version      1.7.7
 // @description  在访问 LINUX DO 帖子时，默认使用树形评论区显示，并在话题页提供全回复话题内搜索
 // @author       xiang0731
 // @match        *://linux.do/*
@@ -725,6 +725,30 @@
         } catch (e) {
             return originalUrl;
         }
+    }
+
+    function getFullReplyListUrl(originalUrl) {
+        try {
+            let isPathRelative = originalUrl.startsWith('/') && !originalUrl.startsWith('//');
+            let url = new URL(originalUrl, window.location.origin);
+            let topicPath = parseTopicPath(url.pathname);
+
+            if (topicPath.route === 'n' && topicPath.topicId) {
+                url.pathname = buildTopicPath('n', topicPath.topicId, topicPath.topicSlug);
+                url.searchParams.delete(FLAT_VIEW_URL_PARAM);
+                if (!url.searchParams.has('sort')) url.searchParams.set('sort', 'old');
+                return isPathRelative ? url.pathname + url.search + url.hash : url.href;
+            }
+
+            if (topicPath.route === 't' && topicPath.topicId) {
+                url.pathname = buildTopicPath('t', topicPath.topicId, topicPath.topicSlug);
+                url.searchParams.delete('sort');
+                return getFlatViewUrl(isPathRelative ? url.pathname + url.search + url.hash : url.href);
+            }
+        } catch (e) {
+            console.error("树形评论区脚本完整回复列表 URL 解析出错:", e);
+        }
+        return originalUrl;
     }
 
     function getFlatTopicUrl(originalUrl) {
@@ -1475,6 +1499,7 @@
             <li role="none"><button type="button" role="menuitem" data-linuxdo-topic-action="search">本话题搜索</button></li>
             <li role="none"><button type="button" role="menuitem" data-linuxdo-topic-action="flat">以平面方式查看</button></li>
             <li role="none"><button type="button" role="menuitem" data-linuxdo-topic-action="nested">以嵌套方式查看</button></li>
+            <li role="none"><button type="button" role="menuitem" data-linuxdo-topic-action="full-replies">显示完整回复列表</button></li>
         `;
         menu.addEventListener('click', (event) => {
             let actionButton = event.target && event.target.closest ? event.target.closest('button[data-linuxdo-topic-action]') : null;
@@ -1491,6 +1516,9 @@
             } else if (actionButton.dataset.linuxdoTopicAction === 'nested') {
                 closeTopicActionMenu();
                 openCurrentTopicNestedView();
+            } else if (actionButton.dataset.linuxdoTopicAction === 'full-replies') {
+                closeTopicActionMenu();
+                openCurrentTopicFullReplyList();
             }
         });
         entry.appendChild(menu);
@@ -1534,6 +1562,22 @@
         let nestedUrl = getNestedViewUrl(window.location.href);
         closeTopicSearchPanel();
         hardNavigateToHref(nestedUrl);
+        return true;
+    }
+
+    function openCurrentTopicFullReplyList() {
+        let topicPath = parseTopicPath(window.location.pathname);
+        if (!topicPath.topicId) return false;
+
+        if (topicPath.route === 't') {
+            rememberFlatViewBypass(topicPath.topicId);
+        } else {
+            forgetFlatViewBypass();
+        }
+
+        let fullReplyListUrl = getFullReplyListUrl(window.location.href);
+        closeTopicSearchPanel();
+        hardNavigateToHref(fullReplyListUrl);
         return true;
     }
 
@@ -2038,10 +2082,12 @@
             getDocumentTitle: () => document.title,
             getFlatTopicUrl,
             getFlatViewUrl,
+            getFullReplyListUrl,
             getNestedViewUrl,
             rememberTopicTitle,
             normalizeTopicSearchResults,
             openCurrentTopicFlatView,
+            openCurrentTopicFullReplyList,
             openCurrentTopicNestedView,
             shouldBypassNestedRewrite,
             shouldKeepCanonicalTopicLink,
